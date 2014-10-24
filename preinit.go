@@ -17,46 +17,17 @@ package preinit
 
 import (
 	//	"fmt"
-	"io"
+	//"io"
 	"os"
 	//	"strconv"
 	//	"strings"
 	//	"unsafe"
 
+	log "github.com/wheelcomplex/preinit/logger"
 	opt "github.com/wheelcomplex/preinit/options"
 )
 
-// copy of os.Args for default arguments parser
-var Args []string
-
-// convert Args([]string) to line string
-var ArgLine string
-
-// command line args with default flags/options
-var ArgFullLine string
-
-// convert Args[0] to absolute file path
-var ExecFile string
-
-var OrigProcTitle string
-
-// default opt Parser
-var Opts *opt.OptParser_t
-
-// initial default command line parser
-func args_init() {
-	Args = make([]string, 0, 0)
-	Args = append(Args, os.Args...)
-	ExecFile = opt.GetExecFileByPid(os.Getpid())
-	// default opt Parser
-	// do not include ExecFile
-	Opts = opt.NewOptParser(Args[1:])
-	ArgLine = opt.ArgsToSpLine(Args)
-	ArgFullLine = opt.CleanArgLine(os.Args[0] + " " + Opts.String())
-	//
-}
-
-//// wraps
+/// command line parser
 
 // wrapper of options.func
 func SetProcTitle(title string) {
@@ -230,67 +201,53 @@ func SetParserFlag(key, value string) {
 
 /// end of command line parser
 
-//// base logging support ////
-/*
-0. five logging file: stdout,stderr,debuglogfile, applogfile, errlogfile + syslog
-0.1 send stdout to applogfile(if enabled), stderr to errlogfile(if enabled) after daemon
-0.2 no level support
-0.3 if debug enabled, applog will send to debuglog too
-4. output file rotation by size
-4. default logger contorl by commandline args(--errlogfile, --applogfile, --debuglogfile, --logrotation, --logmaxsize)
-5. no Drop-in compatibility with code using the standard log package
-6. fixed output format
-7. dup line reduce
-
-*/
-
-// dummy writer, like io/ioutil.Discard, but without syscall
-type Trash_t struct{}
-
-// NewTrash create a new Trash
-func NewTrash() *Trash_t {
-	return &Trash_t{}
-}
-
-// NewTrashWriter create a new Trash and return Writer of it
-func NewTrashWriter() func(p []byte) (n int, err error) {
-	t := &Trash_t{}
-	return t.Write
-}
-
-/*
-   71	// Writer is the interface that wraps the basic Write method.
-   72	//
-   73	// Write writes len(p) bytes from p to the underlying data stream.
-   74	// It returns the number of bytes written from p (0 <= n <= len(p))
-   75	// and any error encountered that caused the write to stop early.
-   76	// Write must return a non-nil error if it returns n < len(p).
-   77	// Write must not modify the slice data, even temporarily.
-   78	type Writer interface {
-   79		Write(p []byte) (n int, err error)
-   80	}
-*/
-
-// Write accept []byte and do nothing
-func (t *Trash_t) Write(p []byte) (n int, err error) {
-	return len(p), nil
-}
-
-//
-type logWriter_t struct {
-	disabled bool           // is writer disabled
-	writer   io.WriteCloser // writer for log writting
-}
-
-// five logging file: stdout,stderr,debuglogfile, applogfile, errlogfile + syslog
-
-type Prelog_t struct {
-	stdout io.WriteCloser // Writer for os.Stdout
-}
-
 //// VARS ////
 
+// copy of os.Args for default arguments parser
+var Args []string
+
+// convert Args([]string) to line string
+var ArgLine string
+
+// command line args with default flags/options
+var ArgFullLine string
+
+// convert Args[0] to absolute file path
+var ExecFile string
+
+var OrigProcTitle string
+
+// default opt Parser
+var Opts *opt.OptParser_t
+
+// initial default command line parser
+func args_init() {
+	Args = make([]string, 0, 0)
+	Args = append(Args, os.Args...)
+	ExecFile = opt.GetExecFileByPid(os.Getpid())
+	// default opt Parser
+	// do not include ExecFile
+	Opts = opt.NewOptParser(Args[1:])
+	ArgLine = opt.ArgsToSpLine(Args)
+	ArgFullLine = opt.CleanArgLine(os.Args[0] + " " + Opts.String())
+	//
+}
+
+/// end of command line parser
+
+/// multi-channel logger
+
+/// end of multi-channel logger
+
+var Logger *log.Logger_t
+
+//
+func logger_init() {
+	Logger = log.NewLogger("preinit", log.LogFlag)
+}
+
 func init() {
+	logger_init()
 	args_init()
 	OrigProcTitle = opt.OrigProcTitle
 	//println("preinit.init() end.")

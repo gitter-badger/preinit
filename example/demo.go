@@ -10,6 +10,7 @@ import (
 	"time"
 
 	pre "github.com/wheelcomplex/preinit"
+	log "github.com/wheelcomplex/preinit/logger"
 	//l4g "github.com/wheelcomplex/preinit/log4go"
 )
 
@@ -72,6 +73,10 @@ Java HotSpot(TM) 64-Bit Server VM (build 24.60-b09, mixed mode)`)
 	*/
 	pre.SetProcTitlePrefix("Master: ")
 	fmt.Println("p9--------------------")
+
+	//
+
+	//
 	time.Sleep(100e9)
 }
 

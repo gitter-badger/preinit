@@ -33,12 +33,6 @@ func NewTrash() *Trash_t {
 	return &Trash_t{}
 }
 
-// NewTrashWriter create a new Trash and return Writer of it
-func NewTrashWriter() func(p []byte) (n int, err error) {
-	t := &Trash_t{}
-	return t.Write
-}
-
 /*
    71	// Writer is the interface that wraps the basic Write method.
    72	//
@@ -289,7 +283,7 @@ func (l *Logger_t) Errlogln(v ...interface{}) {
 	l.WriteToList([]string{"debug", "app", "err", "sys", "stderr"}, fmt.Sprintln(v...))
 }
 
-// Syslog write msg to debug+stdout
+// Syslog write msg to debug+syslog
 func (l *Logger_t) Syslog(v ...interface{}) {
 	l.WriteToList([]string{"debug", "sys"}, fmt.Sprint(v...))
 }

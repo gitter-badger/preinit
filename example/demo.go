@@ -10,7 +10,9 @@ import (
 	"time"
 
 	pre "github.com/wheelcomplex/preinit"
-	log "github.com/wheelcomplex/preinit/logger"
+	"github.com/wheelcomplex/preinit/misc"
+	//log "github.com/wheelcomplex/preinit/logger"
+
 	//l4g "github.com/wheelcomplex/preinit/log4go"
 )
 
@@ -73,10 +75,14 @@ Java HotSpot(TM) 64-Bit Server VM (build 24.60-b09, mixed mode)`)
 	*/
 	pre.SetProcTitlePrefix("Master: ")
 	fmt.Println("p9--------------------")
+	// Mon Jan 2 15:04:05 -0700 MST 2006
+	// 2006-01-02-15-04-MST
+	format := "2006-XXX-01"
+	format = ""
+	starts := time.Time{}
+	nt := misc.TimeFormatNext(format, starts)
+	fmt.Println("start from", starts, "next is", nt, "for", format)
 
-	//
-
-	//
 	time.Sleep(100e9)
 }
 

@@ -1,6 +1,4 @@
-/*
-provide commandLine or custom string parse and command option usage helper
-*/
+// Package options provides command option parser/usage helper for go daemon programing.
 
 //// command line arguments support, flag and usage help ////
 /*
@@ -560,6 +558,11 @@ func (op *OptParser_t) String() string {
 		}
 	}
 	return CleanArgLine(shortflag + " " + longflag + " " + shortoption + " " + longoption + " " + op.GetNoFlagString())
+}
+
+// CmdString convert opt paser struct to strings, include default values
+func (op *OptParser_t) CmdString() string {
+	return op.String()
 }
 
 // ArgsString convert opt paser struct to strings, do not include default values

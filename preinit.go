@@ -1,3 +1,4 @@
+// Package preinit provides utils for go daemon programing.
 /*
 
 1. log
@@ -6,11 +7,41 @@
 4. signal
 5. fdpass+drop privileges
 6. children monitor
+7. pidfile // lockfile
+8. add/del env var
 
-*/
+http://golang.org/pkg/runtime/#LockOSThread
 
-/*
-	https://code.google.com/p/log4go/
+http://golang.org/pkg/runtime/#UnlockOSThread
+
+https://code.google.com/p/go/source/detail?r=a25343ee3016
+
+http://golang.org/pkg/os/#ProcAttr
+
+https://github.com/vbatts/go-cgroup
+http://blog.chinaunix.net/uid-20164485-id-3253720.html
+cat /cgroup/cpu/daenmons/http/tasks   //受控的PID列表
+
+https://groups.google.com/forum/#!topic/golang-nuts/ZHzaQvjH4TA
+
+Your post inspired me to rewrite my "nschroot" tool in Go and it works fine. I found most of what I needed by sniffing around in the syscall package source.
+
+https://github.com/tobert/lnxns
+
+I'm not sure if the syscall.ForkLock.Lock() is necessary, but from reading syscall/exec_unix.go, it sounded like a good idea. http://golang.org/src/pkg/syscall/exec_unix.go?s=6845:6910#L180
+
+I couldn't find any good information on the dangers of running after fork() in go. In my call to clone() I'm careful not to share any more of the process than is necessary so it should be fairly safe to continue doing things, but I haven't tried it yet since nschroot execs right away. It's likely the GC/CoW interactions will use up a little extra memory, but that's normal for fork(). All the usual rules of fork() apply.
+
+Putting children into cgroups can be done by a double fork. Fork once, add that pid to the cgroup's tasks file, then fork your real work inside the namespace with CLONE_PARENT and let the middle child exit.
+
+
+1. patch go source code to enable/implate setuid/setgid/seteuid/setegid
+2. parrent create cgroup for child and fork to --forkhelper
+3. forkhelper LockOSThread
+4. forkhelper setuid and call os/exec/startproc
+5. forkhelper os.Exit(0)
+6. parrent get all pid from cgroup
+
 */
 
 package preinit
@@ -39,9 +70,9 @@ func SetProcTitlePrefix(prefix string) {
 	opt.SetProcTitlePrefix(prefix)
 }
 
-// wrapper of options.String()
+// wrapper of options.CmdString()
 func CmdString() string {
-	return Opts.String()
+	return Opts.CmdString()
 }
 
 // wrapper of options.func
@@ -235,16 +266,16 @@ func args_init() {
 
 /// end of command line parser
 
-/// multi-channel logger
-
-/// end of multi-channel logger
+/// multi-channel logger wrapper
 
 var Logger *log.Logger_t
 
 //
 func logger_init() {
-	Logger = log.NewLogger("preinit", log.LogFlag)
+	Logger = log.NewLogger("pre", log.LogFlag)
 }
+
+/// end of multi-channel logger
 
 func init() {
 	logger_init()

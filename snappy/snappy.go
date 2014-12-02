@@ -36,3 +36,35 @@ const (
 	tagCopy2   = 0x02
 	tagCopy4   = 0x03
 )
+
+// SnappyCodecT implementation Codec interface
+type SnappyCodecT struct {
+	streaming bool
+}
+
+// NewSnappyCodecT return new SnappyCodecT
+func NewSnappyCodecT(streaming bool) *SnappyCodecT {
+	return &SnappyCodecT{
+		streaming: streaming,
+	}
+}
+
+// Decode decode src and save into dst, if len(dst) < MaxDecodedLen(src), new []byte createds
+func (cc *SnappyCodecT) Decode(dst, src []byte) ([]byte, error) {
+	return Decode(dst, src)
+}
+
+// MaxDecodedLen return max length of decoded []byte when decode src
+func (cc *SnappyCodecT) MaxDecodedLen(src []byte) (int, error) {
+	return MaxDecodedLen(src)
+}
+
+// Encode encode src and save into dst, if len(dst) < MaxEncodedLen(src), new []byte created
+func (cc *SnappyCodecT) Encode(dst, src []byte) ([]byte, error) {
+	return Encode(dst, src)
+}
+
+// MaxEncodedLen return max length of encoded []byte when encode src
+func (cc *SnappyCodecT) MaxEncodedLen(srcLen int) int {
+	return MaxEncodedLen(srcLen)
+}

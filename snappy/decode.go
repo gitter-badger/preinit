@@ -12,8 +12,8 @@ import (
 // ErrCorrupt reports that the input is invalid.
 var ErrCorrupt = errors.New("snappy: corrupt input")
 
-// DecodedLen returns the length of the decoded block.
-func DecodedLen(src []byte) (int, error) {
+// MaxDecodedLen returns the length of the decoded block.
+func MaxDecodedLen(src []byte) (int, error) {
 	v, _, err := decodedLen(src)
 	return v, err
 }

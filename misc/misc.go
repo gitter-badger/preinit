@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/rand"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -295,7 +296,28 @@ func TimeFormatNext(format string, from time.Time) time.Time {
 	return nextT
 }
 
-// Mutex from https://github.com/steve-wang/trmutex
+//TODO: /bin/ip monitor
+//get ip addr list with mask, key is 'ip/mask', value is ip only
+func GetIpAddrList() (IpAddrList map[string]string) {
+
+	IpAddrList = make(map[string]string)
+
+	ipaddrlist, err := net.InterfaceAddrs()
+	if err == nil {
+		for _, value := range ipaddrlist {
+			addrString := value.String()
+			pos := strings.Index(addrString, "/")
+			if pos < 1 {
+				pos = len(addrString)
+			}
+			IpAddrList[addrString] = addrString[:pos]
+		}
+	} else {
+		Logger.Stderrf("InterfaceAddrs: %v", err)
+		CleanExit(1)
+	}
+	return
+}
 
 //
 func init() {

@@ -31,6 +31,15 @@ import (
 8. no thread safed
 */
 
+// ListToSlice convert map[string]struct{} to []string
+func ListToSlice(list map[string]struct{}) []string {
+	s := make([]string, 0, len(list))
+	for name, _ := range list {
+		s = append(s, name)
+	}
+	return s
+}
+
 // CompareByteString in zero copy
 // return 0 for equal, -1 for p less, 1 for p larger
 func CompareByteString(p []byte, s string) int {
@@ -120,7 +129,7 @@ func TimeFormatNext(format string, from time.Time) time.Time {
 }
 
 // SafeFileName replace invalid char with _
-// valid char is . 0-9 _ - A-Z a-Z
+// valid char is . 0-9 _ - A-Z a-Z /
 func SafeFileName(name string) string {
 	name = filepath.Clean(name)
 	newname := make([]byte, 0, len(name))
@@ -224,7 +233,7 @@ type RotFile_t struct {
 	curSize    int         //
 	line       int         // max line for rotation
 	curLine    int         //
-	date       string      // date string format to insert into filename
+	format     string      // date string format to insert into filename
 	nextTime   time.Time   //
 	errDummy   bool        // drop all msg if writer error
 	openNext   bool        // should we open next file
@@ -234,7 +243,7 @@ type RotFile_t struct {
 
 // NewRotFile create a new RotFile WriteCloser
 // date format chars must inside 0-9 A-Z a-z _ - /, invalid char will replace by _
-func NewRotFile(filename string, mode os.FileMode, max int, size int, line int, date string) *RotFile_t {
+func NewRotFile(filename string, mode os.FileMode, max int, size int, line int, format string) *RotFile_t {
 	var err error
 	filename, err = filepath.Abs(filepath.Clean(filename))
 	if err != nil {
@@ -247,7 +256,7 @@ func NewRotFile(filename string, mode os.FileMode, max int, size int, line int, 
 		num:      max,
 		size:     size,
 		line:     line,
-		date:     SafeFileName(date),
+		format:   SafeFileName(format),
 	}
 	r.openFile()
 	return r
@@ -278,18 +287,21 @@ func (r *RotFile_t) logFilename() {
 	prefix := ""
 	rot := ""
 	// update next time
-	r.nextTime = TimeFormatNext(r.date, time.Time{})
+	r.nextTime = TimeFormatNext(r.format, time.Time{})
 	// use: http://golang.org/pkg/time/#Time.Before at logwrite
 	if r.nextTime.Equal(time.Time{}) == false {
 		// setup next date string, use date string as filename prefix
-		prefix = time.Now().Format(r.date) + "."
+		prefix = time.Now().Format(r.format) + "."
+	} else if len(r.format) > 0 {
+		prefix = r.format + "."
 	}
 	if r.num > 0 {
 		if r.curNum >= r.num {
 			r.curNum = 0
 		}
-		r.curNum++
+		// start from  zero
 		rot = "." + strconv.Itoa(r.curNum)
+		r.curNum++
 	}
 	r.curFile = filepath.Clean(base + "/" + prefix + name + rot)
 }
@@ -312,9 +324,7 @@ func (r *RotFile_t) openFile() error {
 	// no threadsafe, call by Write or NewRotFile, caller is threadsafe
 	// curFile closed
 	r.reset()
-	if r.nextTime.Equal(time.Time{}) == false {
-		r.logFilename()
-	}
+	r.logFilename()
 	// try to open current file
 	var err error
 	r.file, err = os.OpenFile(r.curFile, O_CREATE|O_APPEND|O_WRONLY, r.mode)
@@ -356,7 +366,7 @@ func (r *RotFile_t) Write(p []byte) (n int, err error) {
 		}
 	}
 	// check file size, check file line
-	if r.curSize >= r.size || r.curLine >= r.line {
+	if (r.size > 0 && r.curSize >= r.size) || (r.line > 0 && r.curLine >= r.line) {
 		r.openNext = true
 	}
 	if r.openNext {
@@ -383,32 +393,33 @@ func (r *RotFile_t) Write(p []byte) (n int, err error) {
 // Close flush buffer and close opened file
 func (r *RotFile_t) Close() error {
 	r.reset()
+	r.errDummy = true
 	return nil
 }
 
 // six logging file: stdout,stderr,debuglogfile, applogfile, errlogfile, syslog
 
-// ListToSlice convert map[string]struct{} to []string
-func ListToSlice(list map[string]struct{}) []string {
-	s := make([]string, 0, len(list))
-	for name, _ := range list {
-		s = append(s, name)
-	}
-	return s
-}
-
 // preinit logger
 // set to DummyOut if one log channel disabled
-type Logger_t struct {
-	prefix   string                    // prefix for Logger
-	flag     int                       // flag for Logger
-	Logs     map[string]*log.Logger    // Loggers
-	closers  map[string]io.WriteCloser // records for SetWriteCloser
-	list     map[string]struct{}       // default list for ListWrite
-	dupCount int                       // dup msg counter
-	last     []byte                    // dup buffer
-	curTime  time.Time                 // update time.Now()
-	dupTime  time.Time                 // max dup time
+type LoggerT struct {
+	mu        sync.Mutex                // write lock
+	writing   bool                      // write flag
+	calldepth int                       // call depth
+	prefix    string                    // prefix for Logger
+	flag      int                       // flag for Logger
+	logChs    map[string]*log.Logger    // Loggers
+	closers   map[string]io.WriteCloser // records for SetWriteCloser
+	list      map[string]struct{}       // default list for ListLog
+	dupCount  int                       // dup msg counter
+	preCount  int                       // dup msg counter
+	last      []byte                    // dup buffer
+	dupHint   []byte                    // dup hint buffer
+	hint      bool                      //
+	dedup     bool                      // is we dedup msg
+	curTime   time.Time                 // update time.Now()
+	dupTime   time.Time                 // max dup time
+	dedups    map[string]bool           //is this channel need dedup
+	closed    map[string]bool           // is channel closed
 	// Logger for stdout
 	// Logger for stderr
 	// Logger for debug
@@ -417,9 +428,9 @@ type Logger_t struct {
 	// Logger for syslog
 }
 
-// NewLogger create a new Logger_t and initial to default
+// NewLogger create a new LoggerT and initial to default
 // flag default to syslog.LOG_DAEMON
-func NewLogger(prefix string, flag int) *Logger_t {
+func NewLogger(prefix string, flag int) *LoggerT {
 	if flag <= 0 {
 		flag = int(syslog.LOG_DAEMON)
 	}
@@ -430,11 +441,13 @@ func NewLogger(prefix string, flag int) *Logger_t {
 	if err != nil {
 		panic("NewLogger failed for " + err.Error())
 	}
-	l := &Logger_t{
-		prefix: prefix,
-		flag:   flag,
-		Logs: map[string]*log.Logger{
-			"sdtout": log.New(os.Stdout, prefix, flag),
+	l := &LoggerT{
+		dedup:     true,
+		calldepth: 4,
+		prefix:    prefix,
+		flag:      flag,
+		logChs: map[string]*log.Logger{
+			"stdout": log.New(os.Stdout, prefix, flag),
 			"stderr": log.New(os.Stderr, prefix, flag),
 			"debug":  log.New(DummyOut, prefix, flag),
 			"app":    log.New(DummyOut, prefix, flag),
@@ -443,384 +456,408 @@ func NewLogger(prefix string, flag int) *Logger_t {
 		},
 		closers: make(map[string]io.WriteCloser),
 		list:    make(map[string]struct{}),
-		last:    make([]byte, 256),
+		last:    make([]byte, 0, 256),
+		dupHint: make([]byte, 0, 256),
 		curTime: time.Now(),
+		dedups: map[string]bool{
+			"stdout": true,
+			"stderr": true,
+			"debug":  false,
+			"app":    false,
+			"err":    true,
+			"sys":    true,
+		},
+		closed: map[string]bool{
+			"stdout": false,
+			"stderr": false,
+			"debug":  false,
+			"app":    false,
+			"err":    false,
+			"sys":    false,
+		},
 	}
-	l.dupTime = l.curTime.Add(30e9)
+	l.dupTime = l.curTime.Add(5e9)
 	return l
 }
 
-// dedup check dup msg and return true for dup
-func (l *Logger_t) dedup(s string) (string, bool) {
-	if CompareByteString(l.last, s) == 0 {
-		l.dupCount++
-		preCount := 0
-		if l.dupTime.Before(l.curTime) {
-			preCount = l.dupCount
-		} else if l.dupCount > 256 {
-			preCount = l.dupCount
+// Calldepth set call depth for logger
+// calldepth == -1 to return current call depth
+// default is 4
+func (l *LoggerT) Calldepth(calldepth int) int {
+	old := l.calldepth
+	if calldepth > 0 {
+		l.calldepth = calldepth
+	}
+	return old
+}
+
+// LogChannelList return list of log channel
+func (l *LoggerT) LogChannelList() map[string]*log.Logger {
+	return l.logChs
+}
+
+// SetDedup control simple dedup of logger
+// default is no-dedup for channel
+func (l *LoggerT) SetChannelDedup(name string, dedup bool) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	old := false
+	if _, ok := l.logChs[name]; ok {
+		old = l.dedups[name]
+		l.dedups[name] = dedup
+	}
+	// update
+	l.dedup = false
+	for name, _ = range l.dedups {
+		if l.closed[name] {
+			continue
 		}
-		if preCount > 0 {
-			l.dupCount = 0
-			l.dupTime = l.curTime.Add(30e9)
-			return fmt.Sprintf("--- last message repleat %d times ---"), true
-		} else {
-			return "", true
+		if l.dedups[name] {
+			l.dedup = true
+			break
 		}
 	}
-	l.last = l.last[:0]
-	l.last = append(l.last, []byte(s)...)
-	l.dupCount = 0
-	return "", false
+	return old
 }
 
 // SetWriter set io.Writer of log write channel
 // io.Writer will not closed when logger close
-func (l *Logger_t) SetWriter(name string, output io.Writer) {
-	if _, ok := l.Logs[name]; ok == false {
+func (l *LoggerT) SetWriter(name string, output io.Writer) {
+	l.mu.Lock()
+	if _, ok := l.logChs[name]; ok == false {
+		l.mu.Unlock()
 		return
 	}
-	l.CloseChannel(name)
-	l.Logs[name] = log.New(output, l.prefix, l.flag)
+	l.mu.Unlock()
+	l.CloseLogChannel(name)
+	l.logChs[name] = log.New(output, l.prefix, l.flag)
+	l.closed[name] = false
 	return
 }
 
 // SetWriteCloser set io.WriteCloser of log write channel
 // io.WriteCloser will closed when logger close
-func (l *Logger_t) SetWriteCloser(name string, output io.WriteCloser) {
-	if _, ok := l.Logs[name]; ok == false {
+func (l *LoggerT) SetWriteCloser(name string, output io.WriteCloser) {
+	l.mu.Lock()
+	if _, ok := l.logChs[name]; ok == false {
+		l.mu.Unlock()
 		return
 	}
-	l.CloseChannel(name)
+	l.mu.Unlock()
+	l.CloseLogChannel(name)
 	l.closers[name] = output
-	l.Logs[name] = log.New(output, l.prefix, l.flag)
+	l.logChs[name] = log.New(output, l.prefix, l.flag)
+	l.closed[name] = false
 	return
 }
 
-// CloseChannel close io.WriteCloser of log write channel
-func (l *Logger_t) CloseChannel(name string) {
-	if _, ok := l.Logs[name]; ok == false {
+// CloseLogChannel close io.WriteCloser of log write channel
+func (l *LoggerT) CloseLogChannel(name string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.logChs[name]; ok == false {
+		return
+	}
+	if l.closed[name] {
 		return
 	}
 	if _, ok := l.closers[name]; ok {
 		l.closers[name].Close()
 		delete(l.closers, name)
 	}
-	l.SetWriter(name, DummyOut)
+	l.closed[name] = true
 	return
 }
 
 // Close close All log write channel
-func (l *Logger_t) Close() {
-	for name, _ := range l.Logs {
-		l.CloseChannel(name)
+func (l *LoggerT) Close() {
+	for name, _ := range l.logChs {
+		l.CloseLogChannel(name)
 	}
 	return
 }
 
-// WriteTo write msg to one log write channel
-func (l *Logger_t) WriteTo(name string, v string) {
-	if _, ok := l.Logs[name]; ok == false {
-		return
+// dupcheck check dup msg and return true for dup
+// dup hint msg --- last message repleat %d times --- will be output befor next no-dup msg
+func (l *LoggerT) dupcheck(s string) bool {
+	if CompareByteString(l.last, s) == 0 {
+		l.dupCount++
+		l.preCount = 0
+		if l.dupTime.Before(l.curTime) {
+			l.preCount = l.dupCount
+		} else if l.dupCount > 199 {
+			l.preCount = l.dupCount
+		}
+		if l.preCount > 0 {
+			// insert to output
+			l.dupHint = l.dupHint[:0]
+			l.dupHint = append(l.dupHint, []byte(fmt.Sprintf("last message repleat %d times", l.dupCount))...)
+			l.hint = true
+			l.dupCount = 0
+			l.dupTime = l.curTime.Add(5e9)
+		}
+		return true
 	}
-	l.Logs[name].Print(v)
+	if l.dupCount > 0 {
+		// insert to output
+		l.dupHint = l.dupHint[:0]
+		l.dupHint = append(l.dupHint, []byte(fmt.Sprintf("last message repleat %d times", l.dupCount))...)
+		l.hint = true
+		l.dupCount = 0
+		l.dupTime = l.curTime.Add(5e9)
+	}
+	l.last = l.last[:0]
+	l.last = append(l.last, []byte(s)...)
+	return false
 }
 
 // WriteToList write msg to list of log write channel
-func (l *Logger_t) WriteToList(names []string, v string) {
+func (l *LoggerT) WriteToList(names []string, v string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var isDup bool
+	l.curTime = time.Now()
+	if l.dedup {
+		isDup = l.dupcheck(v)
+	}
+	if l.hint {
+		// write hint to dedup-enabled channel
+		for _, name := range names {
+			if l.closed[name] {
+				continue
+			}
+			if l.dedups[name] {
+				l.logChs[name].Output(l.calldepth, string(l.dupHint))
+			}
+		}
+		l.hint = false
+	}
 	for _, name := range names {
-		if _, ok := l.Logs[name]; ok == false {
+		if l.closed[name] {
 			continue
 		}
-		l.WriteTo(name, v)
-	}
-}
-
-// Write write msg to all log write channel
-func (l *Logger_t) Write(v string) {
-	for name, _ := range l.Logs {
-		l.WriteTo(name, v)
+		if isDup && l.dedups[name] {
+			//fmt.Printf("isDup %v, l.dedups[%s] %v, l.closed[%s] %v: %s\n", isDup, name, l.dedups[name], name, l.closed[name], v)
+			continue
+		}
+		l.logChs[name].Output(l.calldepth, v)
 	}
 }
 
 // wrappers
 
 // Fatal write msg to err logger and call to os.Exit(1)
-func (l *Logger_t) Fatal(v ...interface{}) {
+func (l *LoggerT) Fatal(v ...interface{}) {
 	l.Errlog(v...)
 	os.Exit(1)
 }
 
-func (l *Logger_t) Fatalf(format string, v ...interface{}) {
+func (l *LoggerT) Fatalf(format string, v ...interface{}) {
 	l.Errlog(fmt.Sprintf(format, v...))
 	os.Exit(1)
 }
 
-func (l *Logger_t) Fatalln(v ...interface{}) {
+func (l *LoggerT) Fatalln(v ...interface{}) {
 	l.Errlog(fmt.Sprintln(v...))
 	os.Exit(1)
 }
 
-func (l *Logger_t) Flags() int {
+func (l *LoggerT) Flags() int {
 	return l.flag
 }
 
 // Panic write msg to err logger and call to panic().
-func (l *Logger_t) Panic(v ...interface{}) {
+func (l *LoggerT) Panic(v ...interface{}) {
 	s := fmt.Sprint(v...)
 	l.Errlog(s)
 	panic(s)
 
 }
-func (l *Logger_t) Panicf(format string, v ...interface{}) {
+func (l *LoggerT) Panicf(format string, v ...interface{}) {
 	s := fmt.Sprintf(format, v...)
 	l.Errlog(s)
 	panic(s)
 }
-func (l *Logger_t) Panicln(v ...interface{}) {
+func (l *LoggerT) Panicln(v ...interface{}) {
 	s := fmt.Sprintln(v...)
 	l.Errlog(s)
 	panic(s)
 }
 
 // Print write msg to debug+stdout
-func (l *Logger_t) Print(v ...interface{}) {
-	s := fmt.Sprint(v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "stdout"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "stdout"}, s)
+func (l *LoggerT) Print(v ...interface{}) {
+	l.WriteToList([]string{"debug", "stdout"}, fmt.Sprint(v...))
 }
 
-func (l *Logger_t) Printf(format string, v ...interface{}) {
-	s := fmt.Sprintf(format, v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "stdout"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "stdout"}, s)
+func (l *LoggerT) Printf(format string, v ...interface{}) {
+	l.WriteToList([]string{"debug", "stdout"}, fmt.Sprintf(format, v...))
 }
 
-func (l *Logger_t) Println(v ...interface{}) {
-	s := fmt.Sprintln(v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "stdout"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "stdout"}, s)
+func (l *LoggerT) Println(v ...interface{}) {
+	l.WriteToList([]string{"debug", "stdout"}, fmt.Sprintln(v...))
 }
 
 // Stdout write msg to debug+stdout
-func (l *Logger_t) Stdout(v ...interface{}) {
-	s := fmt.Sprint(v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "stdout"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "stdout"}, s)
+func (l *LoggerT) Stdout(v ...interface{}) {
+	l.WriteToList([]string{"debug", "stdout"}, fmt.Sprint(v...))
 }
 
-func (l *Logger_t) Stdoutf(format string, v ...interface{}) {
-	s := fmt.Sprintf(format, v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "stdout"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "stdout"}, s)
+func (l *LoggerT) Stdoutf(format string, v ...interface{}) {
+	l.WriteToList([]string{"debug", "stdout"}, fmt.Sprintf(format, v...))
 }
 
-func (l *Logger_t) Stdoutln(v ...interface{}) {
-	s := fmt.Sprintln(v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "stdout"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "stdout"}, s)
+func (l *LoggerT) Stdoutln(v ...interface{}) {
+	l.WriteToList([]string{"debug", "stdout"}, fmt.Sprintln(v...))
 }
 
 // Stderr write msg to debug+stderr
-func (l *Logger_t) Stderr(v ...interface{}) {
-	s := fmt.Sprint(v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "stderr"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "stderr"}, s)
+func (l *LoggerT) Stderr(v ...interface{}) {
+	l.WriteToList([]string{"debug", "stderr"}, fmt.Sprint(v...))
 }
 
-func (l *Logger_t) Stderrf(format string, v ...interface{}) {
-	s := fmt.Sprintf(format, v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "stderr"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "stderr"}, s)
+func (l *LoggerT) Stderrf(format string, v ...interface{}) {
+	l.WriteToList([]string{"debug", "stderr"}, fmt.Sprintf(format, v...))
 }
 
-func (l *Logger_t) Stderrln(v ...interface{}) {
-	s := fmt.Sprintln(v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "stderr"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "stderr"}, s)
+func (l *LoggerT) Stderrln(v ...interface{}) {
+	l.WriteToList([]string{"debug", "stderr"}, fmt.Sprintln(v...))
 }
 
 //
-func (l *Logger_t) SetFlags(flag int) {
+func (l *LoggerT) SetFlags(flag int) {
 	l.flag = flag
 }
 
-func (l *Logger_t) Prefix() string {
+func (l *LoggerT) Prefix() string {
 	return l.prefix
 }
 
-func (l *Logger_t) SetPrefix(prefix string) {
+func (l *LoggerT) SetPrefix(prefix string) {
 	l.prefix = prefix
+	for name, _ := range l.logChs {
+		l.logChs[name].SetPrefix(prefix)
+	}
 }
 
 // Applog write msg to app+debug
-func (l *Logger_t) Applog(v ...interface{}) {
+func (l *LoggerT) Applog(v ...interface{}) {
 	l.WriteToList([]string{"debug", "app"}, fmt.Sprint(v...))
 }
 
-func (l *Logger_t) Applogf(format string, v ...interface{}) {
+func (l *LoggerT) Applogf(format string, v ...interface{}) {
 	l.WriteToList([]string{"debug", "app"}, fmt.Sprintf(format, v...))
 }
 
-func (l *Logger_t) Applogln(v ...interface{}) {
+func (l *LoggerT) Applogln(v ...interface{}) {
 	l.WriteToList([]string{"debug", "app"}, fmt.Sprintln(v...))
 }
 
 // Errlog write msg to err+debug+syslog+stderr
-func (l *Logger_t) Errlog(v ...interface{}) {
-	s := fmt.Sprint(v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "err", "sys", "stderr"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "err", "sys", "stderr"}, s)
+func (l *LoggerT) Errlog(v ...interface{}) {
+	l.WriteToList([]string{"debug", "err", "sys", "stderr"}, fmt.Sprint(v...))
 }
 
-func (l *Logger_t) Errlogf(format string, v ...interface{}) {
-	s := fmt.Sprintf(format, v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "err", "sys", "stderr"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "err", "sys", "stderr"}, s)
+func (l *LoggerT) Errlogf(format string, v ...interface{}) {
+	l.WriteToList([]string{"debug", "err", "sys", "stderr"}, fmt.Sprintf(format, v...))
 }
 
-func (l *Logger_t) Errlogln(v ...interface{}) {
-	s := fmt.Sprintln(v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "err", "sys", "stderr"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "err", "sys", "stderr"}, s)
+func (l *LoggerT) Errlogln(v ...interface{}) {
+	l.WriteToList([]string{"debug", "err", "sys", "stderr"}, fmt.Sprintln(v...))
 }
 
 // Syslog write msg to debug+syslog
-func (l *Logger_t) Syslog(v ...interface{}) {
-	s := fmt.Sprint(v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "sys"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "sys"}, s)
+func (l *LoggerT) Syslog(v ...interface{}) {
+	l.WriteToList([]string{"debug", "sys"}, fmt.Sprint(v...))
 }
 
-func (l *Logger_t) Syslogf(format string, v ...interface{}) {
-	s := fmt.Sprintf(format, v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "sys"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "sys"}, s)
+func (l *LoggerT) Syslogf(format string, v ...interface{}) {
+	l.WriteToList([]string{"debug", "sys"}, fmt.Sprintf(format, v...))
 }
 
-func (l *Logger_t) Syslogln(v ...interface{}) {
-	s := fmt.Sprintln(v...)
-	if rep, dup := l.dedup(s); dup {
-		if rep != "" {
-			l.WriteToList([]string{"debug", "sys"}, rep)
-		}
-		return
-	}
-	l.WriteToList([]string{"debug", "sys"}, s)
+func (l *LoggerT) Syslogln(v ...interface{}) {
+	l.WriteToList([]string{"debug", "sys"}, fmt.Sprintln(v...))
 }
 
-// AddList set list of log write channel for ListWrite
-func (l *Logger_t) AddList(list []string) {
-	for _, name := range list {
-		l.list[name] = struct{}{}
+// Debug write msg to debug
+func (l *LoggerT) Debug(v ...interface{}) {
+	l.WriteToList([]string{"debug"}, "[DEBUG] "+fmt.Sprint(v...))
+}
+
+func (l *LoggerT) Debugf(format string, v ...interface{}) {
+	l.WriteToList([]string{"debug"}, "[DEBUG] "+fmt.Sprintf(format, v...))
+}
+
+func (l *LoggerT) Debugln(v ...interface{}) {
+	l.WriteToList([]string{"debug"}, "[DEBUG] "+fmt.Sprintln(v...))
+}
+
+// AddListlog add ListLog write channel with io.Writer
+// io.Writer will not closed when logger close
+func (l *LoggerT) AddListlog(name string, output io.Writer) {
+	if _, ok := l.logChs[name]; ok {
+		l.CloseLogChannel(name)
 	}
+	l.logChs[name] = log.New(output, l.prefix, l.flag)
+	l.list[name] = struct{}{}
+	l.dedups[name] = false
+	l.closed[name] = false
 	return
 }
 
-// RemoveList delete list of log write channel for ListWrite
-func (l *Logger_t) RemoveList(list []string) {
+// AddListlogCloser add ListLog write channel with io.WriteCloser
+// io.WriteCloser will closed when logger close
+func (l *LoggerT) AddListlogCloser(name string, output io.WriteCloser) {
+	if _, ok := l.logChs[name]; ok {
+		l.CloseLogChannel(name)
+	}
+	l.closers[name] = output
+	l.logChs[name] = log.New(output, l.prefix, l.flag)
+	l.list[name] = struct{}{}
+	l.dedups[name] = false
+	l.closed[name] = false
+	return
+}
+
+// GetListLog return current list of ListLog write channel
+func (l *LoggerT) GetListLog() map[string]struct{} {
+	return l.list
+}
+
+// RemoveListLog delete list of ListLog write channel
+func (l *LoggerT) RemoveListLog(list []string) {
 	for _, name := range list {
 		delete(l.list, name)
+		l.CloseLogChannel(name)
 	}
 	return
 }
 
 // Listlog write msg to listed write channel
-func (l *Logger_t) Listlog(v ...interface{}) {
+func (l *LoggerT) Listlog(v ...interface{}) {
 	l.WriteToList(ListToSlice(l.list), fmt.Sprint(v...))
 }
 
-func (l *Logger_t) Listlogf(format string, v ...interface{}) {
+func (l *LoggerT) Listlogf(format string, v ...interface{}) {
 	l.WriteToList(ListToSlice(l.list), fmt.Sprintf(format, v...))
 }
 
-func (l *Logger_t) Listlogln(v ...interface{}) {
+func (l *LoggerT) Listlogln(v ...interface{}) {
 	l.WriteToList(ListToSlice(l.list), fmt.Sprintln(v...))
 }
 
 //
 var DummyOut io.WriteCloser
 
-var LogFlag int
-
 //
 func logger_init() {
-	LogFlag = int(syslog.LOG_DAEMON)
 	DummyOut = NewTrash()
 }
 
+var LogFlag int
+
 //
 func init() {
+	LogFlag = int(syslog.LOG_DAEMON)
 	logger_init()
 }
 

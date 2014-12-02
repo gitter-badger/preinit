@@ -219,7 +219,7 @@ func (o *Option_t) String() string {
 		line = o.long
 	}
 	if o.sestion == "options" {
-		line = line + " [value1,value2,value3], "
+		line = line + " [value,...], "
 	} else if line != "" {
 		line = line + ", "
 	}
@@ -251,7 +251,9 @@ type OptParser_t struct {
 	longArr            map[string][]string             // list for '--flag' options
 	noFlagList         []string                        // list for '/path/filename /path/file2 /path/file3'
 	sestions           map[string]map[string]*Option_t // sestion list, default include: __version, __desc, options, flags, lists, __notes
+	sestionKeys        map[string][]string             // list of --options in order
 	maxSestionTitleLen int                             // prefix lenght for usage format
+	powered            string                          // powered string
 }
 
 // NewOptParserString parsed args and return opt paser struct
@@ -301,6 +303,16 @@ func (op *OptParser_t) setOption(sestion, long string, defval []string, format s
 		sestion: sestion,
 		defval:  defval,
 	}
+	if _, ok := op.sestionKeys[sestion]; ok == false {
+		op.sestionKeys[sestion] = make([]string, 0, 0)
+	}
+	for idx, val := range op.sestionKeys[sestion] {
+		if val == long {
+			//fmt.Println("sestionKeys", sestion, long, "existed")
+			op.sestionKeys[sestion][idx] = ""
+		}
+	}
+	op.sestionKeys[sestion] = append(op.sestionKeys[sestion], long)
 	return op.sestions[sestion][long].String()
 }
 
@@ -352,6 +364,9 @@ func (op *OptParser_t) sestionString(sestion string) string {
 	if _, ok := op.sestions[sestion]; ok == false {
 		return text
 	}
+	if len(op.sestions[sestion]) == 0 {
+		return text
+	}
 	if strings.HasPrefix(sestion, "__") == false {
 		padlen := op.maxSestionTitleLen - len(sestion)
 		if padlen > 0 {
@@ -360,11 +375,14 @@ func (op *OptParser_t) sestionString(sestion string) string {
 			text = sestion + ":\n"
 		}
 	}
-	if len(op.sestions[sestion]) == 0 {
-		return text
-	}
 	// option line
-	for idx, _ := range op.sestions[sestion] {
+	//fmt.Printf("op.sestionKeys[%s]: %v\n", sestion, op.sestionKeys[sestion])
+	//fmt.Printf("op.sestions[%s]: %v\n", sestion, op.sestions[sestion])
+	for _, idx := range op.sestionKeys[sestion] {
+		if idx == "" {
+			continue
+		}
+		//fmt.Printf("op.sestions[%s]: %v => %v\n", sestion, idx, op.sestions[sestion][idx])
 		text = text + "  " + op.sestions[sestion][idx].String() + "\n"
 	}
 	return strings.Trim(text, " ")
@@ -384,7 +402,11 @@ func (op *OptParser_t) DescriptionString() string {
 
 // NoteString return notes text in string
 func (op *OptParser_t) NoteString() string {
-	return op.sestionString("__notes")
+	if op.powered == "" {
+		return op.sestionString("__notes")
+	} else {
+		return op.sestionString("__notes") + op.powered
+	}
 }
 
 // OptionString return options text in string
@@ -408,7 +430,7 @@ func (op *OptParser_t) CommandString() string {
 	if _, ok := op.sestions["options"]; ok {
 		for idx, _ := range op.sestions["options"] {
 			if op.sestions["options"][idx].long != "" {
-				longopt = "[--options value1,value2,value3...]"
+				longopt = "[--options value,...]"
 				break
 			}
 		}
@@ -437,7 +459,7 @@ func (op *OptParser_t) CommandString() string {
 
 // UsageString return usage text in string
 func (op *OptParser_t) UsageString() string {
-	return op.VersionString() + op.DescriptionString() + "\n" + op.CommandString() + op.OptionString() + op.FlagString() + op.NoFlagString() + op.NoteString()
+	return strings.Trim(op.VersionString()+"\n"+op.DescriptionString()+"\nUSAGE:\n"+op.CommandString()+op.OptionString()+op.FlagString()+op.NoFlagString()+op.NoteString(), "\n") + "\n"
 }
 
 // Usage output usage text to stderr
@@ -460,7 +482,19 @@ func (op *OptParser_t) reset() {
 	op.sestions = make(map[string]map[string]*Option_t)
 	op.sestions["options"] = make(map[string]*Option_t)
 	op.sestions["flags"] = make(map[string]*Option_t)
+	op.sestionKeys = make(map[string][]string)
 	op.maxSestionTitleLen = 0
+	op.powered = "Powered by https://github.com/wheelcomplex/preinit"
+}
+
+// Powered set powered string of usage
+// empty val to return current string
+func (op *OptParser_t) Powered(val string) string {
+	old := op.powered
+	if val != "" {
+		op.powered = val
+	}
+	return old
 }
 
 // String convert opt paser struct to strings, include default values
@@ -782,6 +816,11 @@ func (op *OptParser_t) GetBool(flag string) bool {
 		return true
 	}
 	return false
+}
+
+// GetFlag is alias of GetBool
+func (op *OptParser_t) GetFlag(flag string) bool {
+	return op.GetBool(flag)
 }
 
 //// modify options of OptParser_t

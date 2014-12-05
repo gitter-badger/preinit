@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/rand"
-	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -21,6 +20,23 @@ import (
 func UNUSED(v interface{}) {
 	_ = v
 	return
+}
+
+// CommError is common error with error code support
+type CommError struct {
+	Code  int
+	Err   error
+	Addon interface{}
+}
+
+// String return formated string of CommError
+func (ce *CommError) String() string {
+	return fmt.Sprintf("error code %d, %s", ce.Code, ce.Err.Error())
+}
+
+// Error return formated string of CommError
+func (ce *CommError) Error() string {
+	return ce.String()
 }
 
 // IsNumeric returns true if a string contains only ascii digits from 0-9.
@@ -50,67 +66,61 @@ func RoundString(n int64, base int64) string {
 	return fmt.Sprintf("%d.%s", v1/base, v2str)
 }
 
-// uuidChan output UUID from UUID generator
-var uuidChan chan int64
-
 // buffer size of uuidChan
-const UUIDCHANBUFFSIZE int = 10240
+const UUIDCHANBUFFSIZE int = 128
 
-// miscMutex
-var miscMutex *sync.Mutex
-
-// GetUUIDChan return output chan of background UUID generator
-func GetUUIDChan() chan int64 {
-	miscMutex.Lock()
-	defer miscMutex.Unlock()
-	if uuidChan == nil {
-		uuidChan, _ = NewUUIDChan(UUIDCHANBUFFSIZE)
-	}
-	return uuidChan
+// UUIDChan
+type UUIDChan struct {
+	C      chan int64 // output channel
+	m      sync.Mutex //
+	closed bool
 }
 
 // NewUUIDChan return a new output chan of background UUID generator
 // close exit chan will stop the generator
-func NewUUIDChan(buferSize int) (out chan int64, exit chan struct{}) {
-	if buferSize < 1 {
-		buferSize = 1
-	}
-	out = make(chan int64, buferSize)
-	exit = make(chan struct{}, 1)
-	go UUIDGen(uuidChan, exit)
-	go UUIDGen(uuidChan, exit)
-	return out, exit
-}
-
-// UUIDGen generator UUID and output to out channel
-// exit if exit channel closed
-func UUIDGen(out chan int64, exit chan struct{}) {
-	var seed int64
-	seedstr := strconv.FormatInt(int64(time.Now().UnixNano()), 10) + ":" + strconv.Itoa(os.Getpid()) + ":" + strconv.Itoa(os.Getppid())
-	h := fnv.New64a()
-	_, err := h.Write([]byte(seedstr))
-	if err != nil {
-		seed = int64(time.Now().UnixNano())
-	} else {
-		seed = int64(h.Sum64())
-	}
-	h.Reset()
-	fmt.Println("UUIDGen seed:", seed)
-	r := rand.New(rand.NewSource(seed))
-	loop := true
-	for loop {
-		select {
-		case <-exit:
-			loop = false
-		default:
+func NewUUIDChan() *UUIDChan {
+	out := make(chan int64, UUIDCHANBUFFSIZE)
+	go func() {
+		var seed int64
+		seedstr := strconv.FormatInt(int64(time.Now().UnixNano()), 10) + ":" + strconv.Itoa(os.Getpid()) + ":" + strconv.Itoa(os.Getppid())
+		h := fnv.New64a()
+		_, err := h.Write([]byte(seedstr))
+		if err != nil {
+			seed = int64(time.Now().UnixNano())
+		} else {
+			seed = int64(h.Sum64())
+		}
+		h.Reset()
+		fmt.Println("UUIDGen seed:", seed)
+		r := rand.New(rand.NewSource(seed))
+		// handle close
+		defer func() {
+			recover()
+		}()
+		for {
 			out <- r.Int63()
 		}
+	}()
+	return &UUIDChan{
+		C: out,
 	}
+}
+
+//
+func (uc *UUIDChan) Close() {
+	uc.m.Lock()
+	defer uc.m.Unlock()
+	if uc.closed {
+		return
+	}
+	uc.closed = true
+	close(uc.C)
+	return
 }
 
 // UUID use hash/fnv1a64 to generate int64
 // base on time.Now() / os.Getpid() / os.Getpid() / runtime.ReadMemStats()
-// NOTICE: this function is slow
+// NOTICE: this function is slow, use UUIDChan for heavy load
 func UUID() int64 {
 	var seed int64
 	seedstr := strconv.FormatInt(int64(time.Now().UnixNano()), 10) + ":" + strconv.Itoa(os.Getpid()) + ":" + strconv.Itoa(os.Getppid())
@@ -296,37 +306,66 @@ func TimeFormatNext(format string, from time.Time) time.Time {
 	return nextT
 }
 
-//TODO: /bin/ip monitor
-//get ip addr list with mask, key is 'ip/mask', value is ip only
-func GetIpAddrList() (IpAddrList map[string]string) {
+//
+type ByteRWCloser []byte
 
-	IpAddrList = make(map[string]string)
+func NewByteRWCloser(size int) ByteRWCloser {
+	return ByteRWCloser(make([]byte, size))
+}
 
-	ipaddrlist, err := net.InterfaceAddrs()
-	if err == nil {
-		for _, value := range ipaddrlist {
-			addrString := value.String()
-			pos := strings.Index(addrString, "/")
-			if pos < 1 {
-				pos = len(addrString)
-			}
-			IpAddrList[addrString] = addrString[:pos]
-		}
+// Read Implementations Reader interface
+func (brw ByteRWCloser) Read(p []byte) (n int, err error) {
+	lb := len(brw)
+	lp := len(p)
+	if lb > lp {
+		n = lp
 	} else {
-		Logger.Stderrf("InterfaceAddrs: %v", err)
-		CleanExit(1)
+		n = lb
+		err = io.EOF
 	}
+	copy(p, brw)
 	return
 }
 
-//
-func init() {
-
-	// initial to nil, until user call GetUUIDChan
-	uuidChan = nil
-
-	//
-	miscMutex = &sync.Mutex{}
+// Write Implementations Writer interface
+func (brw ByteRWCloser) Write(p []byte) (n int, err error) {
+	lb := len(brw)
+	lp := len(p)
+	if lb > lp {
+		n = lp
+	} else {
+		n = lb
+	}
+	copy(brw, p)
+	return
 }
+
+// Close Implementations Closer interface
+func (brw ByteRWCloser) Close() (err error) {
+	return
+}
+
+////TODO: /bin/ip monitor
+////get ip addr list with mask, key is 'ip/mask', value is ip only
+//func GetIpAddrList() (IpAddrList map[string]string) {
+
+//	IpAddrList = make(map[string]string)
+
+//	ipaddrlist, err := net.InterfaceAddrs()
+//	if err == nil {
+//		for _, value := range ipaddrlist {
+//			addrString := value.String()
+//			pos := strings.Index(addrString, "/")
+//			if pos < 1 {
+//				pos = len(addrString)
+//			}
+//			IpAddrList[addrString] = addrString[:pos]
+//		}
+//	} else {
+//		Logger.Stderrf("InterfaceAddrs: %v", err)
+//		CleanExit(1)
+//	}
+//	return
+//}
 
 //

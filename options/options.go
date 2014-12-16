@@ -114,6 +114,13 @@ func SetProcTitlePrefix(prefix string) {
 	C.spt_setproctitle(cs)
 }
 
+func SetProcTitleSuffix(prefix string) {
+	title := OrigProcTitle + prefix
+	cs := C.CString(title)
+	defer C.free(unsafe.Pointer(cs))
+	C.spt_setproctitle(cs)
+}
+
 // end of SetProcTitle
 
 // argsIndex return index of flag in args, if no found return -1

@@ -43,7 +43,7 @@ type SnappyCodecT struct {
 }
 
 // NewSnappyCodecT return new SnappyCodecT
-func NewSnappyCodecT(streaming bool) *SnappyCodecT {
+func NewCodec(streaming bool) *SnappyCodecT {
 	return &SnappyCodecT{
 		streaming: streaming,
 	}

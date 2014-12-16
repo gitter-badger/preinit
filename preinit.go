@@ -304,6 +304,11 @@ func SetProcTitlePrefix(prefix string) {
 	options.SetProcTitlePrefix(prefix)
 }
 
+// wrapper of options.func
+func SetProcTitleSuffix(suffix string) {
+	options.SetProcTitleSuffix(suffix)
+}
+
 // wrapper of options.CmdString()
 func CmdString() string {
 	return opts.CmdString()

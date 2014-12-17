@@ -522,7 +522,6 @@ func (ae *AES) keyinitial(key []byte) {
 	ae.key = ae.key[:AES_KEYLEN]
 
 	//fmt.Printf("NewAES: iv(%d): %x\n", len(ae.iv), ae.iv)
-	h := fnv.New64a()
 	h.Write(ae.key)
 	ae.iv = h.Sum(ae.iv)
 	ivlen := len(ae.iv)

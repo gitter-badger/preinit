@@ -63,23 +63,3 @@ func (d *digest) Reset() {
 	d.tail = nil
 	d.bmixer.reset()
 }
-
-// murmur3 is a implementation of preinit Hash
-type murmur3 struct {
-	// nothing here
-}
-
-// NewMurmur3 return new *murmur3
-func NewMurmur3() *murmur3 {
-	return &murmur3{}
-}
-
-// Sum32 returns the sum of data in uint32
-func (h *murmur3) Sum32(data []byte) uint32 {
-	return Sum32(data)
-}
-
-// Sum64 returns the sum of data in uint64
-func (h *murmur3) Sum64(data []byte) uint64 {
-	return Sum64(data)
-}

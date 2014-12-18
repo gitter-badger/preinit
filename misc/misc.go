@@ -91,6 +91,11 @@ func UNUSED(v interface{}) {
 	return
 }
 
+// GetXID return fmt.Sprintf("%x", d)
+func GetXID(d interface{}) string {
+	return fmt.Sprintf("%x", d)
+}
+
 // CommError is common error with error code support
 type CommError struct {
 	Code  int
@@ -418,7 +423,7 @@ func NewBRWC(p []byte) *ByteRWCloser {
 
 // Read Implementations Reader interface
 func (brw *ByteRWCloser) Read(p []byte) (n int, err error) {
-	if brw.rptr > len(brw.Bytes) {
+	if brw.rptr >= len(brw.Bytes) {
 		err = io.EOF
 		return
 	}
@@ -437,7 +442,7 @@ func (brw *ByteRWCloser) Read(p []byte) (n int, err error) {
 
 // Write Implementations Writer interface
 func (brw *ByteRWCloser) Write(p []byte) (n int, err error) {
-	if brw.rptr > len(brw.Bytes) {
+	if brw.wptr >= len(brw.Bytes) {
 		err = io.ErrShortWrite
 		return
 	}
@@ -481,7 +486,8 @@ type AES struct {
 	nonce        uint64           // index of iv
 	hdrlen       int              // length of binary nonce
 	uuid         *UUIDChan        // uuid output for nonce
-	iv           []byte           // iv nonce
+	eniv         []byte           // iv for encrypt
+	deiv         []byte           // iv for decrypt
 	block        cipher.Block     //
 	blockEncrypt cipher.BlockMode //
 	blockDecrypt cipher.BlockMode //
@@ -500,15 +506,16 @@ func NewAES(key []byte) *AES {
 	if err != nil {
 		panic(fmt.Sprintf("aes.NewCipher failed: %s", err.Error()))
 	}
-	ae.blockEncrypt = cipher.NewCBCEncrypter(ae.block, ae.iv)
-	ae.blockDecrypt = cipher.NewCBCDecrypter(ae.block, ae.iv)
+	ae.blockEncrypt = cipher.NewCBCEncrypter(ae.block, ae.eniv)
+	ae.blockDecrypt = cipher.NewCBCDecrypter(ae.block, ae.deiv)
 	return ae
 }
 
 // keyinitial
 func (ae *AES) keyinitial(key []byte) {
 	ae.key = make([]byte, 0, AES_KEYLEN)
-	ae.iv = make([]byte, 0, aes.BlockSize)
+	ae.eniv = make([]byte, 0, aes.BlockSize)
+	ae.deiv = make([]byte, 0, aes.BlockSize)
 	h := fnv.New64a()
 	h.Write(key)
 	ae.key = h.Sum(ae.key)
@@ -523,22 +530,35 @@ func (ae *AES) keyinitial(key []byte) {
 
 	//fmt.Printf("NewAES: iv(%d): %x\n", len(ae.iv), ae.iv)
 	h.Write(ae.key)
-	ae.iv = h.Sum(ae.iv)
-	ivlen := len(ae.iv)
+	ae.eniv = h.Sum(ae.eniv)
+	ivlen := len(ae.eniv)
 	for ivlen < aes.BlockSize {
 		// iv is short
-		h.Write(ae.iv)
-		ae.iv = h.Sum(ae.iv)
-		ivlen = len(ae.iv)
+		h.Write(ae.eniv)
+		ae.eniv = h.Sum(ae.eniv)
+		ivlen = len(ae.eniv)
 	}
-	ae.iv = ae.iv[:aes.BlockSize]
+	ae.eniv = ae.eniv[:aes.BlockSize]
+
+	//fmt.Printf("NewAES: iv(%d): %x\n", len(ae.iv), ae.iv)
+	h.Write(ae.key)
+	ae.deiv = h.Sum(ae.deiv)
+	ivlen = len(ae.deiv)
+	for ivlen < aes.BlockSize {
+		// iv is short
+		h.Write(ae.deiv)
+		ae.deiv = h.Sum(ae.deiv)
+		ivlen = len(ae.deiv)
+	}
+	ae.deiv = ae.deiv[:aes.BlockSize]
 }
 
 func (ae *AES) ivsinitial() {
 	allivsize := IVSCOUNT * aes.BlockSize
 	ae.ivs = make([]byte, 0, allivsize+aes.BlockSize)
 	h := fnv.New64a()
-	h.Write(ae.iv)
+	h.Write(ae.eniv)
+	h.Write(ae.deiv)
 	ae.ivs = h.Sum(ae.ivs)
 	h.Write(ae.key)
 	ae.ivs = h.Sum(ae.ivs)
@@ -568,17 +588,24 @@ func (ae *AES) ivsinitial() {
 
 // ivnonce get nonce iv pair
 // if input n == 0, return random nonce + iv pair
-func (ae *AES) ivnonce(n uint64) ([]byte, uint64) {
+func (ae *AES) ivnonce(n uint64, isEncrypt bool) uint64 {
 	if n == 0 {
 		n = uint64(<-ae.uuid.C)
 	}
 	ptr := (int(n) % IVSCOUNT) * aes.BlockSize
-	return ae.ivs[ptr : ptr+aes.BlockSize], n
+	if isEncrypt {
+		copy(ae.eniv, ae.ivs[ptr:ptr+aes.BlockSize])
+		binary.Write(NewBRWC(ae.eniv), binary.BigEndian, &n)
+	} else {
+		copy(ae.deiv, ae.ivs[ptr:ptr+aes.BlockSize])
+		binary.Write(NewBRWC(ae.deiv), binary.BigEndian, &n)
+	}
+	return n
 }
 
-// BlockPadding implemented PKCS7Padding
+// pkcs7padding implemented PKCS7Padding
 // dst always bigger then src
-func (ae *AES) BlockPadding(dst, plainText []byte) []byte {
+func (ae *AES) pkcs7padding(dst, plainText []byte) []byte {
 	padding := aes.BlockSize - (len(plainText) % aes.BlockSize)
 	// WARNING: memory copy
 	dst = dst[:0]
@@ -587,16 +614,16 @@ func (ae *AES) BlockPadding(dst, plainText []byte) []byte {
 	return dst
 }
 
-// BlockUnPadding implemented PKCS7Padding
-func (ae *AES) BlockUnPadding(plainText []byte) ([]byte, error) {
+// pkcs7unpadding implemented PKCS7Padding
+func (ae *AES) pkcs7unpadding(plainText []byte) ([]byte, error) {
 	length := len(plainText)
 	if length == 0 {
-		return nil, fmt.Errorf("BlockUnPadding, invalid input: zero length")
+		return nil, fmt.Errorf("pkcs7unpadding, invalid input: zero length")
 	}
 	unpadding := int(plainText[length-1])
 	offset := (length - unpadding)
 	if offset > length || offset <= 0 {
-		return nil, fmt.Errorf("BlockUnPadding, invalid input: length %d unpadding %d offset %d", length, unpadding, offset)
+		return nil, fmt.Errorf("pkcs7unpadding, invalid input: length %d unpadding %d offset %d", length, unpadding, offset)
 	}
 	return plainText[:offset], nil
 }
@@ -604,7 +631,7 @@ func (ae *AES) BlockUnPadding(plainText []byte) ([]byte, error) {
 // EncryptSize return size of encrypted msg with padding
 // EncryptSize always bigger then srclen
 func (ae *AES) EncryptSize(srclen int) int {
-	return srclen + aes.BlockSize - (srclen % aes.BlockSize)
+	return srclen + aes.BlockSize - (srclen % aes.BlockSize) + ae.hdrlen
 }
 
 // Encrypt encrypt src into []byte
@@ -613,15 +640,15 @@ func (ae *AES) EncryptSize(srclen int) int {
 func (ae *AES) Encrypt(encryptText []byte, src []byte) []byte {
 	ae.mutex.Lock()
 	defer ae.mutex.Unlock()
-	dstlen := ae.EncryptSize(len(src)) + ae.hdrlen
+	dstlen := ae.EncryptSize(len(src))
 	if len(encryptText) < dstlen {
 		encryptText = make([]byte, dstlen)
 	}
-	ae.BlockPadding(encryptText[ae.hdrlen:], src)
-	// update nonce iv
-	ae.iv, ae.nonce = ae.ivnonce(0)
-	//fmt.Printf("AES, Encrypt IV(%d): %x\n", ae.nonce, ae.iv)
-	ae.blockEncrypt = cipher.NewCBCEncrypter(ae.block, ae.iv)
+	ae.pkcs7padding(encryptText[ae.hdrlen:], src)
+	// update nonce encrypt iv
+	ae.nonce = ae.ivnonce(0, true)
+	//fmt.Printf("AES, Encrypt IV(%d): %x\n", ae.nonce, ae.eniv)
+	ae.blockEncrypt = cipher.NewCBCEncrypter(ae.block, ae.eniv)
 	ae.blockEncrypt.CryptBlocks(encryptText[ae.hdrlen:], encryptText[ae.hdrlen:])
 	// fill nonce, no error handle
 	binary.Write(NewBRWC(encryptText[:ae.hdrlen]), binary.BigEndian, &ae.nonce)
@@ -645,16 +672,27 @@ func (ae *AES) Decrypt(decryptText []byte, src []byte) ([]byte, error) {
 	// get nonce, no error handle
 	binary.Read(NewBRWC(src[:ae.hdrlen]), binary.BigEndian, &ae.nonce)
 	// update nonce iv
-	ae.iv, _ = ae.ivnonce(ae.nonce)
-	//fmt.Printf("AES, Decrypt IV(%d): %x\n", ae.nonce, ae.iv)
-	ae.blockDecrypt = cipher.NewCBCDecrypter(ae.block, ae.iv)
+	ae.ivnonce(ae.nonce, false)
+	//fmt.Printf("AES, Decrypt IV(%d): %x\n", ae.nonce, ae.deiv)
+	ae.blockDecrypt = cipher.NewCBCDecrypter(ae.block, ae.deiv)
 	ae.blockDecrypt.CryptBlocks(decryptText, src[ae.hdrlen:])
 	var err error
-	decryptText, err = ae.BlockUnPadding(decryptText)
+	decryptText, err = ae.pkcs7unpadding(decryptText)
 	if err != nil {
 		return nil, err
 	}
 	return decryptText, nil
+}
+
+// Close discard all internal resource
+func (ae *AES) Close() {
+	ae.mutex.Lock()
+	defer ae.mutex.Unlock()
+	if ae.ivs == nil {
+		return
+	}
+	ae.ivs = nil
+	ae.uuid.Close()
 }
 
 ////TODO: /bin/ip monitor

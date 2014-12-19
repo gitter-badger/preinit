@@ -10,6 +10,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
+	"hash"
 	"hash/fnv"
 	"io"
 	"math/rand"
@@ -154,19 +155,19 @@ type UUIDChan struct {
 // close exit chan will stop the generator
 func NewUUIDChan() *UUIDChan {
 	out := make(chan int64, UUIDCHANBUFFSIZE)
+	var seed int64
+	seedstr := strconv.FormatInt(int64(time.Now().UnixNano()), 10) + ":" + strconv.Itoa(os.Getpid()) + ":" + strconv.Itoa(os.Getppid())
+	h := fnv.New64a()
+	_, err := h.Write([]byte(seedstr))
+	if err != nil {
+		seed = int64(time.Now().UnixNano())
+	} else {
+		seed = int64(h.Sum64())
+	}
+	h.Reset()
+	//fmt.Println("NewUUIDChan, UUIDGen seed:", seed)
+	r := rand.New(rand.NewSource(seed))
 	go func() {
-		var seed int64
-		seedstr := strconv.FormatInt(int64(time.Now().UnixNano()), 10) + ":" + strconv.Itoa(os.Getpid()) + ":" + strconv.Itoa(os.Getppid())
-		h := fnv.New64a()
-		_, err := h.Write([]byte(seedstr))
-		if err != nil {
-			seed = int64(time.Now().UnixNano())
-		} else {
-			seed = int64(h.Sum64())
-		}
-		h.Reset()
-		//fmt.Println("NewUUIDChan, UUIDGen seed:", seed)
-		r := rand.New(rand.NewSource(seed))
 		// handle close
 		defer func() {
 			recover()
@@ -402,6 +403,13 @@ func TimeFormatNext(format string, from time.Time) time.Time {
 	return nextT
 }
 
+// Tpf write msg with time suffix to stdout
+func Tpf(format string, v ...interface{}) {
+	ts := fmt.Sprintf("[%s] ", time.Now().String())
+	msg := fmt.Sprintf(format, v...)
+	fmt.Printf("%s%s", ts, msg)
+}
+
 //
 type ByteRWCloser struct {
 	Bytes []byte
@@ -472,6 +480,72 @@ func (brw *ByteRWCloser) Reset() {
 	return
 }
 
+//
+// TODO: standalone keyaes package
+//
+
+// FnvUintExpend use fnv64a to expend uint64
+func FnvUintExpend(init uint64, size int) []byte {
+	buf := make([]byte, binary.Size(&init))
+	binary.BigEndian.PutUint64(buf, uint64(init))
+	return FnvExpend(buf, size)
+}
+
+// FnvUintFastExpend use fnv64a to expend uint64
+func FnvUintFastExpend(init uint64, size int) []byte {
+	buf := make([]byte, binary.Size(&init))
+	binary.BigEndian.PutUint64(buf, uint64(init))
+	return FnvFastExpend(buf, size)
+}
+
+// FnvExpend use fnv64a to expend []byte
+func FnvExpend(init []byte, size int) []byte {
+	exp := make([]byte, 0, size)
+	h := fnv.New64a()
+	h.Write(init)
+	exp = h.Sum(exp)
+	keylen := len(exp)
+	for keylen < size {
+		// key is short
+		h.Write(exp)
+		exp = h.Sum(exp)
+		keylen = len(exp)
+	}
+	exp = exp[:size]
+	return exp
+}
+
+// FnvFastExpend use fnv64a and byte shift to expend []byte
+func FnvFastExpend(init []byte, size int) []byte {
+	exp := make([]byte, 0, size)
+	h := fnv.New64a()
+	h.Write(init)
+	exp = h.Sum(exp)
+	keylen := len(exp)
+	ptr := keylen
+	offset := 0
+	for keylen < size {
+		if ptr == offset {
+			ptr = keylen
+			offset = ptr - aes.BlockSize - aes.BlockSize - aes.BlockSize
+			if offset < 0 {
+				offset = 0
+			}
+			for wptr := int(keylen / 3); wptr > 0; wptr-- {
+				exp = append(exp, exp[wptr])
+				exp = append(exp, exp[keylen-wptr])
+			}
+		}
+		// key is short
+		h.Write(exp[offset:ptr])
+		ptr--
+		exp = h.Sum(exp)
+		keylen = len(exp)
+	}
+	exp = exp[:size]
+	return exp
+}
+
 // The length of the AES key, either 16, 24, or 32 bytes to select AES-128, AES-192, or AES-256
 const AES_KEYLEN int = 16
 
@@ -484,6 +558,8 @@ type AES struct {
 	key          []byte           // AES-128
 	ivs          []byte           // N * iv map
 	nonce        uint64           // index of iv
+	encryptsum   uint64           // checksum of plaintext
+	decryptsum   uint64           // checksum of plaintext
 	hdrlen       int              // length of binary nonce
 	uuid         *UUIDChan        // uuid output for nonce
 	eniv         []byte           // iv for encrypt
@@ -492,16 +568,18 @@ type AES struct {
 	blockEncrypt cipher.BlockMode //
 	blockDecrypt cipher.BlockMode //
 	mutex        sync.Mutex       //
+	fnv64a       hash.Hash64      //
 }
 
 // NewAES create new *AES with key and iv map
 func NewAES(key []byte) *AES {
 	var err error
-	ae := &AES{}
+	ae := &AES{
+		fnv64a: fnv.New64a(),
+	}
 	ae.hdrlen = binary.Size(ae.nonce)
 	ae.uuid = NewUUIDChan()
 	ae.keyinitial(key)
-	ae.ivsinitial()
 	ae.block, err = aes.NewCipher(ae.key)
 	if err != nil {
 		panic(fmt.Sprintf("aes.NewCipher failed: %s", err.Error()))
@@ -511,79 +589,29 @@ func NewAES(key []byte) *AES {
 	return ae
 }
 
-// keyinitial
-func (ae *AES) keyinitial(key []byte) {
-	ae.key = make([]byte, 0, AES_KEYLEN)
-	ae.eniv = make([]byte, 0, aes.BlockSize)
-	ae.deiv = make([]byte, 0, aes.BlockSize)
-	h := fnv.New64a()
-	h.Write(key)
-	ae.key = h.Sum(ae.key)
-	keylen := len(ae.key)
-	for keylen < AES_KEYLEN {
-		// key is short
-		h.Write(key)
-		ae.key = h.Sum(ae.key)
-		keylen = len(ae.key)
-	}
-	ae.key = ae.key[:AES_KEYLEN]
-
-	//fmt.Printf("NewAES: iv(%d): %x\n", len(ae.iv), ae.iv)
-	h.Write(ae.key)
-	ae.eniv = h.Sum(ae.eniv)
-	ivlen := len(ae.eniv)
-	for ivlen < aes.BlockSize {
-		// iv is short
-		h.Write(ae.eniv)
-		ae.eniv = h.Sum(ae.eniv)
-		ivlen = len(ae.eniv)
-	}
-	ae.eniv = ae.eniv[:aes.BlockSize]
-
-	//fmt.Printf("NewAES: iv(%d): %x\n", len(ae.iv), ae.iv)
-	h.Write(ae.key)
-	ae.deiv = h.Sum(ae.deiv)
-	ivlen = len(ae.deiv)
-	for ivlen < aes.BlockSize {
-		// iv is short
-		h.Write(ae.deiv)
-		ae.deiv = h.Sum(ae.deiv)
-		ivlen = len(ae.deiv)
-	}
-	ae.deiv = ae.deiv[:aes.BlockSize]
+// sum64a return fnv64a sum base on AES key
+func (ae *AES) sum64a(p []byte, iv []byte) uint64 {
+	defer ae.fnv64a.Reset()
+	ae.fnv64a.Reset()
+	ae.fnv64a.Write(iv)
+	ae.fnv64a.Write(p)
+	ae.fnv64a.Write(ae.key)
+	return ae.fnv64a.Sum64()
 }
 
-func (ae *AES) ivsinitial() {
-	allivsize := IVSCOUNT * aes.BlockSize
-	ae.ivs = make([]byte, 0, allivsize+aes.BlockSize)
-	h := fnv.New64a()
-	h.Write(ae.eniv)
-	h.Write(ae.deiv)
-	ae.ivs = h.Sum(ae.ivs)
-	h.Write(ae.key)
-	ae.ivs = h.Sum(ae.ivs)
-	ivslen := len(ae.ivs)
-	ptr := ivslen
-	offset := 0
-	for ivslen < allivsize {
-		if ptr == offset {
-			ptr = ivslen
-			offset = ivslen - aes.BlockSize*3
-			if offset < 0 {
-				offset = 0
-			}
-			for wptr := int(ivslen / 3); wptr > 0; wptr-- {
-				ae.ivs = append(ae.ivs, ae.ivs[wptr])
-				ae.ivs = append(ae.ivs, ae.ivs[ivslen-wptr])
-			}
-		}
-		// ivs is short
-		h.Write(ae.ivs[offset:ptr])
-		ae.ivs = h.Sum(ae.ivs)
-		ptr--
-		ivslen = len(ae.ivs)
-	}
-	ae.ivs = ae.ivs[:allivsize]
+// keyinitial
+func (ae *AES) keyinitial(key []byte) {
+	//
+	ae.key = FnvExpend(key, AES_KEYLEN)
+
+	//
+	ae.eniv = FnvExpend(ae.key, aes.BlockSize)
+
+	//
+	ae.deiv = FnvExpend(ae.eniv, aes.BlockSize)
+
+	//
+	ae.ivs = FnvFastExpend(ae.key, IVSCOUNT*aes.BlockSize)
 }
 
 // ivnonce get nonce iv pair
@@ -603,35 +631,65 @@ func (ae *AES) ivnonce(n uint64, isEncrypt bool) uint64 {
 	return n
 }
 
-// pkcs7padding implemented PKCS7Padding
+// PackSize return size of pack for srclen, and paddingsize included in packsize
+func (ae *AES) PackSize(srclen int) (packsize, paddingsize int) {
+	paddingsize = aes.BlockSize - ((srclen + ae.hdrlen) % aes.BlockSize)
+	packsize = srclen + ae.hdrlen + paddingsize
+	//println("PackSize, src", srclen, "paddingsize", paddingsize, "packsize", packsize)
+	return
+}
+
+// EncryptSize return size of encrypted msg(included checksum) with padding
+// EncryptSize = uint64(nonce)+packsize
+func (ae *AES) EncryptSize(srclen int) int {
+	packsize, _ := ae.PackSize(srclen)
+	//println("EncryptSize, src", srclen, "full size", ae.hdrlen+packsize)
+	return ae.hdrlen + packsize
+}
+
+// encryptPack implemented PKCS7Padding
 // dst always bigger then src
-func (ae *AES) pkcs7padding(dst, plainText []byte) []byte {
-	padding := aes.BlockSize - (len(plainText) % aes.BlockSize)
+//
+// encrypt transport format:
+// uint64(nonce)+encryptBlock
+// encryptBlock = hash(src)+[]byte(src)
+//
+func (ae *AES) encryptPack(dst, src []byte) []byte {
+	//
+	_, padding := ae.PackSize(len(src))
 	// WARNING: memory copy
-	dst = dst[:0]
-	dst = append(dst, plainText...)
+	dst = dst[:ae.hdrlen]
+	// write checksum of src
+	ae.encryptsum = ae.sum64a(src, ae.eniv)
+	binary.Write(NewBRWC(dst), binary.BigEndian, &ae.encryptsum)
+	dst = append(dst, src...)
 	dst = append(dst, bytes.Repeat([]byte{byte(padding)}, padding)...)
 	return dst
 }
 
-// pkcs7unpadding implemented PKCS7Padding
-func (ae *AES) pkcs7unpadding(plainText []byte) ([]byte, error) {
+// decryptUnPack implemented PKCS7Padding
+func (ae *AES) decryptUnPack(plainText []byte) ([]byte, error) {
 	length := len(plainText)
-	if length == 0 {
-		return nil, fmt.Errorf("pkcs7unpadding, invalid input: zero length")
+	if length < ae.hdrlen {
+		return nil, fmt.Errorf("decryptUnPack, invalid input: invalid length")
 	}
 	unpadding := int(plainText[length-1])
 	offset := (length - unpadding)
 	if offset > length || offset <= 0 {
-		return nil, fmt.Errorf("pkcs7unpadding, invalid input: length %d unpadding %d offset %d", length, unpadding, offset)
+		//return nil, fmt.Errorf("decryptUnPack, invalid input: length %d unpadding %d offset %d", length, unpadding, offset)
+		return nil, fmt.Errorf("decryptUnPack, invalid input: invalid offset")
 	}
-	return plainText[:offset], nil
-}
-
-// EncryptSize return size of encrypted msg with padding
-// EncryptSize always bigger then srclen
-func (ae *AES) EncryptSize(srclen int) int {
-	return srclen + aes.BlockSize - (srclen % aes.BlockSize) + ae.hdrlen
+	if offset < ae.hdrlen {
+		return nil, fmt.Errorf("decryptUnPack, invalid input: invalid unpadding length")
+	}
+	//ae.decryptsum = uint64(ByteUUID(plainText[ae.hdrlen:offset]))
+	ae.decryptsum = ae.sum64a(plainText[ae.hdrlen:offset], ae.deiv)
+	binary.Read(NewBRWC(plainText[:ae.hdrlen]), binary.BigEndian, &ae.encryptsum)
+	if ae.decryptsum != ae.encryptsum {
+		return nil, fmt.Errorf("decryptUnPack, invalid input: checksum mismatch, need %x, got %x", ae.decryptsum, ae.encryptsum)
+		//return nil, fmt.Errorf("decryptUnPack, invalid input: checksum mismatch")
+	}
+	return plainText[ae.hdrlen:offset], nil
 }
 
 // Encrypt encrypt src into []byte
@@ -644,9 +702,13 @@ func (ae *AES) Encrypt(encryptText []byte, src []byte) []byte {
 	if len(encryptText) < dstlen {
 		encryptText = make([]byte, dstlen)
 	}
-	ae.pkcs7padding(encryptText[ae.hdrlen:], src)
-	// update nonce encrypt iv
+	// update nonce encrypt ae.eniv
 	ae.nonce = ae.ivnonce(0, true)
+	//
+	// encrypt transport format: uint64(nonce)+encryptBlock(uint64(hash(src))+[]byte(src))
+	//
+	ae.encryptPack(encryptText[ae.hdrlen:], src)
+
 	//fmt.Printf("AES, Encrypt IV(%d): %x\n", ae.nonce, ae.eniv)
 	ae.blockEncrypt = cipher.NewCBCEncrypter(ae.block, ae.eniv)
 	ae.blockEncrypt.CryptBlocks(encryptText[ae.hdrlen:], encryptText[ae.hdrlen:])
@@ -671,13 +733,13 @@ func (ae *AES) Decrypt(decryptText []byte, src []byte) ([]byte, error) {
 	decryptText = decryptText[:srclen]
 	// get nonce, no error handle
 	binary.Read(NewBRWC(src[:ae.hdrlen]), binary.BigEndian, &ae.nonce)
-	// update nonce iv
+	// update nonce ae.deiv
 	ae.ivnonce(ae.nonce, false)
 	//fmt.Printf("AES, Decrypt IV(%d): %x\n", ae.nonce, ae.deiv)
 	ae.blockDecrypt = cipher.NewCBCDecrypter(ae.block, ae.deiv)
 	ae.blockDecrypt.CryptBlocks(decryptText, src[ae.hdrlen:])
 	var err error
-	decryptText, err = ae.pkcs7unpadding(decryptText)
+	decryptText, err = ae.decryptUnPack(decryptText)
 	if err != nil {
 		return nil, err
 	}
@@ -692,6 +754,7 @@ func (ae *AES) Close() {
 		return
 	}
 	ae.ivs = nil
+	ae.fnv64a.Reset()
 	ae.uuid.Close()
 }
 

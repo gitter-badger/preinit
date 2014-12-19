@@ -18,6 +18,11 @@ func MaxDecodedLen(src []byte) (int, error) {
 	return v, err
 }
 
+// DecodedLen returns the length of the decoded block.
+func DecodedLen(src []byte) (int, error) {
+	return MaxDecodedLen(src)
+}
+
 // decodedLen returns the length of the decoded block and the number of bytes
 // that the length header occupied.
 func decodedLen(src []byte) (blockLen, headerLen int, err error) {

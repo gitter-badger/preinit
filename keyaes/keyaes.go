@@ -188,7 +188,7 @@ func (ae *AES) decryptUnPack(plainText []byte) ([]byte, error) {
 	}
 	unpadding := int(plainText[length-1])
 	offset := (length - unpadding)
-	if offset > length || offset <= 0 {
+	if offset > aes.BlockSize || offset <= 0 {
 		//return nil, fmt.Errorf("decryptUnPack, invalid input: length %d unpadding %d offset %d", length, unpadding, offset)
 		return nil, fmt.Errorf("decryptUnPack, invalid input: invalid offset")
 	}

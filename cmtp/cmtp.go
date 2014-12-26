@@ -19,16 +19,6 @@
 //user	0m2.294s
 //sys	0m4.520s
 
-// operation mode
-// active, connect to remote opaddr
-// passive, listen at opaddr, waiting for active peer
-// --opmode active|passive --opaddr 0.0.0.0:8099|10.236.12.43:8099
-
-// forward mode
-// listener, listen at fwdaddr, waiting for local client
-// connector, connect to fwdaddr, when got new connection require
-// --fwdmode listener|connector --fwdaddr 0.0.0.0:6090|127.0.0.1:6090
-
 //
 package cmtp
 
@@ -464,7 +454,7 @@ type CodecMixer struct {
 	assembleFastCh chan *mixerFrame            // assemble write frame
 	assembleCh     chan *mixerFrame            // assemble write frame
 	codec          Codec                       // frame codec
-	hash           Checksum                    // frame header hash
+	checksum       Checksum                    // frame header hash
 	filter         Filter                      // frame filter
 	state          MIXER_STATE                 // mixer state
 	closing        chan struct{}               // close notify for all ReadFrom/WriteTo
@@ -478,212 +468,8 @@ type CodecMixer struct {
 	ssWriteCh      map[uint64]chan *mixerFrame // disassemble write frame
 }
 
-// Config for Mixer
-type Config struct {
-
-	// auth token for remote identify
-	// defaut: 0
-	Token uint64
-
-	// listen on host:port for client connection
-	// empty list to disable client listening
-	// default: map[string]string{"127.0.0.1:6099":"127.0.0.1:6099"}
-	ClientListens map[string]string
-
-	// listen on host:port for peer connection
-	// peer listening only accept the remote with same token
-	// empty list to disable peer listening
-	// PeerListens and PeerList should not empty at the same time
-	// default: map[string]string{"0.0.0.0:9099":"0.0.0.0:9099"}
-	PeerListens map[string]string
-
-	// remote forwarder list, format: host:port, index by name
-	// on startup, connect to remote with token
-	// PeerListens and PeerList should not empty at the same time
-	// default: {} (empty)
-	PeerList map[string]string
-
-	// number of connections create to each peer
-	// default is 5
-	PeerConnNum int
-
-	// filter use to handle data assemble/disassemble
-	// default: NewTCPFilter("--CMTP--", "127.0.0.1:6099")
-	Filter Filter
-
-	// Codec use to compress/uncompress frame
-	// default: SnappyCodec
-	Codec Codec
-
-	// Checksum use to sum frame header
-	// default: Murmur3
-	Checksum Checksum
-}
-
-// passiveConfig is default config for MixerServer
-var passiveConfig = Config{
-	Token:         0,
-	ClientListens: map[string]string{"127.0.0.1:6099": "127.0.0.1:6099"},
-	PeerListens:   map[string]string{"0.0.0.0:9099": "0.0.0.0:9099"},
-	PeerList:      map[string]string{},
-	PeerConnNum:   5,
-	Filter:        NewTCPFilter([]byte("--CMTP--"), "127.0.0.1:6099"),
-	Codec:         NewSnappyCodec(),
-	Checksum:      NewMurmur3(0),
-}
-
-// Merge feed cfg with value from template
-// WARNING: no deep copy
-func (cfg *Config) Merge(template *Config) {
-	if cfg.Token == 0 {
-		cfg.Token = template.Token
-	}
-	if len(cfg.ClientListens) == 0 {
-		cfg.ClientListens = template.ClientListens
-	}
-	if len(cfg.PeerListens) == 0 {
-		cfg.PeerListens = template.PeerListens
-	}
-	if len(cfg.PeerList) == 0 {
-		cfg.PeerList = template.PeerList
-	}
-	if cfg.PeerConnNum <= 0 {
-		cfg.PeerConnNum = template.PeerConnNum
-	}
-	if cfg.Filter == nil {
-		cfg.Filter = template.Filter
-	}
-	if cfg.Codec == nil {
-		cfg.Codec = template.Codec
-	}
-	if cfg.Checksum == nil {
-		cfg.Checksum = template.Checksum
-	}
-}
-
-type MixerServer struct {
-	cfg           *Config                         // config data for server
-	peerConns     map[string]map[int]*net.TCPConn //
-	peerListens   map[string]*net.TCPListener     //
-	clientConns   map[string]map[int]*net.TCPConn //
-	clientListens map[string]*net.TCPListener     //
-	mx            *CodecMixer                     //
-	closing       chan struct{}                   //
-	closed        chan struct{}                   //
-}
-
-// tpf is short alias of misc.Tpf
-var tpf = misc.Tpf
-
-// NewServer initial MixerServer using cfg config
-func NewServer(cfg *Config) (*MixerServer, error) {
-	// default setup
-	cfg.Merge(&passiveConfig)
-	ms := &MixerServer{
-		cfg:           cfg,
-		peerConns:     make(map[string]map[int]*net.TCPConn),
-		peerListens:   make(map[string]*net.TCPListener),
-		clientConns:   make(map[string]map[int]*net.TCPConn),
-		clientListens: make(map[string]*net.TCPListener),
-		closing:       make(chan struct{}, CHANNEL_BUFFER_SIZE),
-		closed:        make(chan struct{}, CHANNEL_BUFFER_SIZE),
-	}
-	if err := ms.ConfigCheck(ms.cfg); err != nil {
-		return nil, err
-	}
-	//
-	// initial CodecMixer
-	//
-	ms.mx = newCodecMixer(cfg.Token, cfg.Codec, cfg.Checksum, cfg.Filter)
-	return ms, nil
-}
-
-// NewActiveServer return MixerServer using active config
-func NewActiveServer(token uint64, peerList map[string]string) (*MixerServer, error) {
-	cfg := &Config{
-		Token: token,
-	}
-	cfg.Merge(&passiveConfig)
-	// disable client listener
-	cfg.ClientListens = map[string]string{}
-	// disable peer listener
-	cfg.PeerListens = map[string]string{}
-	//
-	cfg.PeerList = peerList
-	return NewServer(cfg)
-}
-
-// NewPassiveServer return MixerServer using passive config
-func NewPassiveServer(token uint64) (*MixerServer, error) {
-	cfg := &Config{
-		Token: token,
-	}
-	return NewServer(cfg)
-}
-
-// ConfigCheck check config and return error
-func (ms *MixerServer) ConfigCheck(cfg *Config) error {
-	if cfg == nil {
-		return errors.New("invalid config: nil config")
-	}
-	if len(cfg.PeerList) == 0 && len(cfg.PeerListens) == 0 {
-		return errors.New("invalid config: both PeerList and PeerListens empty")
-	}
-	return nil
-}
-
-//
-func (ms *MixerServer) Run() error {
-	//
-	// initial client listener
-	//
-	for laddr, idx := range ms.cfg.ClientListens {
-		nl, err := net.Listen("tcp", laddr)
-		tpf("listening %s for client ... %v\n", idx, err)
-		if err != nil {
-			return err
-		}
-		// func (l *TCPListener) AcceptTCP() (*TCPConn, error)
-		ms.clientListens[idx] = nl.(*net.TCPListener)
-		go ms.mx.acceptClient(ms.clientListens[idx])
-	}
-	//
-	// initial peer listener
-	//
-	for laddr, idx := range ms.cfg.PeerListens {
-		nl, err := net.Listen("tcp", laddr)
-		tpf("listening %s for peer ... %v\n", idx, err)
-		if err != nil {
-			return err
-		}
-		// func (l *TCPListener) AcceptTCP() (*TCPConn, error)
-		ms.peerListens[idx] = nl.(*net.TCPListener)
-		go ms.mx.acceptPeer(ms.peerListens[idx])
-	}
-	//
-	// initial peer connect
-	//
-	for raddr, idx := range ms.cfg.PeerList {
-		ms.peerConns[idx] = make(map[int]*net.TCPConn)
-		for i := 0; i < ms.cfg.PeerConnNum; i++ {
-			nl, err := net.Dial("tcp", raddr)
-			tpf("connecting to peer %s ... %v\n", idx, err)
-			if err != nil {
-				return err
-			}
-			ms.peerConns[idx][i] = nl.(*net.TCPConn)
-			go ms.mx.newPeer(ms.peerConns[idx][i], true)
-		}
-	}
-	return nil
-}
-
-//
-func (ms *MixerServer) Close() {
-}
-
 // newCodecMixer return *CodecMixer
-func newCodecMixer(token uint64, codec Codec, hash Checksum, filter Filter) *CodecMixer {
+func newCodecMixer(token uint64, codec Codec, checksum Checksum, filter Filter) *CodecMixer {
 	cpus := int(float32(runtime.GOMAXPROCS(-1)) * 2.618)
 	chansize := cpus*5 + CHANNEL_BUFFER_SIZE
 	//
@@ -703,7 +489,7 @@ func newCodecMixer(token uint64, codec Codec, hash Checksum, filter Filter) *Cod
 		assembleCh:     make(chan *mixerFrame, chansize),
 		ssWriteCh:      make(map[uint64]chan *mixerFrame),
 		codec:          codec,
-		hash:           hash,
+		checksum:       checksum,
 		filter:         filter,
 		state:          MIXER_STATE_RESET,
 		closing:        make(chan struct{}, cpus*10),
@@ -932,7 +718,7 @@ func (tf *CodecMixer) encodeLoop(count int) {
 	var err error
 	var maxcodeclen int
 	var payloadbuf []byte
-	hash := tf.hash.New(0)
+	hash := tf.checksum.New(0)
 	for {
 		mf, ok = <-tf.encodeCh
 		if ok == false {
@@ -1035,7 +821,7 @@ func (tf *CodecMixer) readLoop(rw io.ReadWriteCloser, count int) {
 	var ok bool
 	var err error
 	var iobytes, emptyio, errorCount int
-	hash := tf.hash.New(0)
+	hash := tf.checksum.New(0)
 	for {
 		mf, ok = <-tf.ioFreeCh
 		if ok == false {

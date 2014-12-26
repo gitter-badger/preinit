@@ -13,6 +13,7 @@ import (
 	"hash"
 	"hash/fnv"
 	"io"
+	"math"
 	"math/rand"
 	"net"
 	"os"
@@ -756,6 +757,150 @@ func (ae *AES) Close() {
 	ae.ivs = nil
 	ae.fnv64a.Reset()
 	ae.uuid.Close()
+}
+
+//
+type Any255Base struct {
+	last     int
+	ptr      int
+	count    []uint8
+	Overflow chan bool
+}
+
+//
+func NewAny255Base(size int) *Any255Base {
+	if size < 0 {
+		size = -size
+	}
+	if size == 0 {
+		size = 1
+	}
+	return &Any255Base{
+		last:     int(size) - 1,
+		ptr:      int(size) - 1,
+		count:    make([]uint8, size),
+		Overflow: make(chan bool, 16),
+	}
+}
+
+// reset to up flow or down flow
+// over == true, fill to zero
+// over == false, fill to MAX
+func (a *Any255Base) reset(over bool) {
+	for ptr := 0; ptr <= a.last; ptr++ {
+		if over {
+			// up flow
+			a.count[ptr] = 0
+		} else {
+			a.count[ptr] = math.MaxUint8
+		}
+	}
+	if over {
+		// up flow
+		a.ptr = a.last
+	} else {
+		// down flow
+		a.ptr = 0
+	}
+	// clean up
+	for len(a.Overflow) > 0 {
+		<-a.Overflow
+	}
+	a.Overflow <- over
+}
+
+// Plus do ++
+func (a *Any255Base) Plus() {
+	ptr := a.last
+	for {
+		if a.count[ptr] == math.MaxUint8 {
+			a.count[ptr] = 0
+			ptr--
+			if ptr == -1 {
+				// overflow
+				a.reset(true)
+				ptr = a.last
+			}
+			continue
+		}
+		a.count[ptr]++
+		if ptr < a.ptr {
+			a.ptr = ptr
+		}
+		return
+	}
+}
+
+// Mimus do --
+func (a *Any255Base) Mimus() {
+	for {
+		if a.count[a.last] == 0 {
+			if a.ptr == a.last {
+				// overflow
+				a.reset(false)
+			} else {
+				// a.ptr < a.last
+				a.count[a.last] = math.MaxUint8
+				next := a.last
+				for {
+					next--
+					if a.count[next] == 0 {
+						a.count[next] = math.MaxUint8 - 1
+					} else {
+						a.count[next]--
+						break
+					}
+				}
+				if a.count[next] == 0 && a.ptr == next {
+					a.ptr++
+				}
+			}
+		} else {
+			a.count[a.last]--
+			return
+		}
+	}
+}
+
+// FillBytes fill binary bytes of number
+func (a *Any255Base) FillBytes(p []byte) []byte {
+	fptr := len(p) - 1
+	for ptr := a.last; ptr >= 0 && fptr >= 0; ptr-- {
+		p[fptr] = byte(a.count[ptr])
+		fptr--
+	}
+	return p
+}
+
+// Bytes return binary Bytes of number
+func (a *Any255Base) Bytes() []byte {
+	return a.FillBytes(make([]byte, a.last+1))
+}
+
+// FillMapBytes to p Bytes []byte
+func (a *Any255Base) FillMapBytes(p []byte) []byte {
+	tmp := a.Bytes()
+	step := len(p) / len(tmp)
+	if step == 0 {
+		copy(p, tmp)
+	} else {
+		for i := 0; i < len(tmp); i++ {
+			p[i*step] = tmp[i]
+		}
+	}
+	return p
+}
+
+// MapBytes to explen Bytes []byte
+func (a *Any255Base) MapBytes(explen int) []byte {
+	return a.FillMapBytes(make([]byte, explen))
+}
+
+// Touint64 return uint64 of Any255Base
+// if size of base > 8, return ony 8 bytes
+func (a *Any255Base) Touint64() uint64 {
+	u64, _ := binary.Uvarint(a.FillBytes(make([]byte, 8)))
+	return u64
 }
 
 ////TODO: /bin/ip monitor

@@ -13,11 +13,16 @@ import (
 	"github.com/wheelcomplex/preinit/misc"
 )
 
-func show(size int, count *int64, start time.Time) {
-	totalneed := int64(math.Pow(2, float64(size*8)))
+func show(size int, count *uint64, start time.Time) {
+	totalneed := uint64(math.Pow(2, float64(size*8)))
 	esp := time.Now().Sub(start)
-	qps := (*count * int64(time.Second) / esp.Nanoseconds())
-	fmt.Printf("size %d, need %d - count %d = %d, esp %v, qps %d\n", size, totalneed, *count, totalneed-*count, esp, qps)
+	qps := (*count * uint64(time.Second) / uint64(esp.Nanoseconds()))
+	if totalneed < *count {
+		fmt.Printf("size %d, need %d - count %d = %d, esp %v, qps %d\n", size, totalneed, *count, int64(totalneed-*count), esp, qps)
+	} else {
+		fmt.Printf("size %d, need %d - count %d = %d, esp %v, qps %d\n", size, totalneed, *count, uint64(totalneed-*count), esp, qps)
+	}
+
 }
 
 func genbuf(idleblocks, procblocks chan []byte, size int) {
@@ -25,22 +30,22 @@ func genbuf(idleblocks, procblocks chan []byte, size int) {
 		// all done, close
 		close(procblocks)
 	}()
-	ab := misc.NewAny255Base(size)
+	ab := misc.NewBigCounter(size)
 	for {
-		plaintext := <-idleblocks
-		//copy(plaintext, ab.bytes())
-		ab.FillBytes(plaintext)
-		procblocks <- plaintext
-		ab.Plus()
-		// over flow
-		if len(ab.Overflow) > 0 {
-			<-ab.Overflow
+		buf := <-idleblocks
+		//copy(buf, ab.bytes())
+		ab.FillBytes(buf)
+		//fmt.Printf("%x\n", buf)
+		procblocks <- buf
+		// over flow check
+		if err := ab.Plus(); err != nil {
+			//fmt.Printf("%s\n", err)
 			return
 		}
 	}
 }
 
-func procbuf(procblocks, idleblocks chan []byte, count, totalProc *int64) {
+func procbuf(procblocks, idleblocks chan []byte, count, totalProc *uint64) {
 	for buf := range procblocks {
 		//fmt.Printf("%x\n", buf)
 		*count++
@@ -86,7 +91,7 @@ func main() {
 
 	// proc
 	wg.Add(1)
-	var count, totalProc int64
+	var count, totalProc uint64
 	go func() {
 		defer wg.Done()
 		procbuf(procblocks, idleblocks, &count, &totalProc)

@@ -14,6 +14,7 @@ import (
 	"hash/fnv"
 	"io"
 	"math"
+	"math/big"
 	"math/rand"
 	"net"
 	"os"
@@ -760,11 +761,208 @@ func (ae *AES) Close() {
 }
 
 //
+type bigDoCounter interface {
+
+	//
+	String() string
+
+	//
+	FillBytes(p []byte) []byte
+
+	//
+	Bytes() []byte
+
+	//
+	Mimus() error
+
+	//
+	Plus() error
+
+	//
+	Touint64() []uint64
+
+	//
+	Size() int
+
+	//
+	Reset(over bool)
+}
+
+//
+type BigCounter struct {
+	w bigDoCounter
+}
+
+func NewBigCounter(size int) *BigCounter {
+	if size < 0 {
+		size = -size
+	}
+	if size == 0 {
+		size = 1
+	}
+	bc := &BigCounter{}
+	if size <= 8 {
+		bc.w = Newfix64base(size)
+	} else {
+		bc.w = NewAny255Base(size)
+	}
+	return bc
+}
+
+//
+func (a *BigCounter) String() string {
+	return a.w.String()
+}
+
+//
+func (a *BigCounter) FillBytes(p []byte) []byte {
+	return a.w.FillBytes(p)
+}
+
+//
+func (a *BigCounter) Bytes() []byte {
+	return a.w.Bytes()
+}
+
+//
+func (a *BigCounter) Mimus() error {
+	return a.w.Mimus()
+}
+
+//
+func (a *BigCounter) Plus() error {
+	return a.w.Plus()
+}
+
+//
+func (a *BigCounter) Touint64() []uint64 {
+	return a.w.Touint64()
+}
+
+//
+func (a *BigCounter) Size() int {
+	return a.w.Size()
+}
+
+//
+type fix64base struct {
+	size  int
+	last  int
+	max   uint64
+	count uint64
+	disp  uint64
+}
+
+//
+func Newfix64base(size int) *fix64base {
+	if size < 0 {
+		size = -size
+	}
+	if size == 0 {
+		size = 1
+	}
+	if size > 8 {
+		size = 8
+	}
+	return &fix64base{
+		size: size,
+		last: size - 1,
+		max:  uint64(math.Pow(2, float64(size*8))) - 1,
+	}
+}
+
+//
+func (a *fix64base) String() string {
+	return fmt.Sprintf("%d", a.count)
+}
+
+//
+func (a *fix64base) FillBytes(p []byte) []byte {
+	if len(p) == 0 {
+		return p
+	} else if len(p) == a.size {
+		for i := a.last; i >= 0; i-- {
+			a.disp = a.count
+			for j := 0; j < (a.last - i); j++ {
+				a.disp = a.disp >> 8
+			}
+			p[i] = uint8(a.disp)
+		}
+		/*
+			p[0] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8 >> 8 >> 8)
+			p[1] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8 >> 8)
+			p[2] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8)
+			p[3] = uint8(a.count >> 8 >> 8 >> 8 >> 8)
+			p[4] = uint8(a.count >> 8 >> 8 >> 8)
+			p[5] = uint8(a.count >> 8 >> 8)
+			p[6] = uint8(a.count >> 8)
+			p[7] = uint8(a.count)
+		*/
+	} else {
+		//println("fix64base FillBytes !=")
+		// if len(p) < a.size, will got last N bytes
+		tmp := a.Bytes()
+		step := len(p) / len(tmp)
+		for i := 0; i < len(tmp); i++ {
+			p[i*step] = tmp[i]
+		}
+	}
+	return p
+}
+
+//
+func (a *fix64base) Bytes() []byte {
+	return a.FillBytes(make([]byte, a.size))
+}
+
+//
+func (a *fix64base) Mimus() error {
+	if a.count == 0 {
+		a.Reset(false)
+		return fmt.Errorf("Mimus cross zero, reset to max %d", a.max)
+	}
+	a.count--
+	return nil
+}
+
+//
+func (a *fix64base) Plus() error {
+	if a.count == a.max {
+		a.Reset(true)
+		return fmt.Errorf("Plus cross max %d, reset to zero", a.max)
+	}
+	a.count++
+	return nil
+}
+
+//
+func (a *fix64base) Touint64() []uint64 {
+	return []uint64{uint64(a.count)}
+}
+
+// Reset to up flow or down flow
+// over == true, fill to zero
+// over == false, fill to MAX
+func (a *fix64base) Reset(over bool) {
+	//fmt.Printf("reset %v when count %d\n", over, a.count)
+	if over {
+		// up flow
+		a.count = 0
+	} else {
+		a.count = a.max
+	}
+}
+
+// Size return size of Bytes()
+func (a *fix64base) Size() int {
+	return a.size
+}
+
+//
 type Any255Base struct {
-	last     int
-	ptr      int
-	count    []uint8
-	Overflow chan bool
+	*fix64base
+	ptr   int
+	count []uint8
 }
 
 //
@@ -775,42 +973,21 @@ func NewAny255Base(size int) *Any255Base {
 	if size == 0 {
 		size = 1
 	}
-	return &Any255Base{
-		last:     int(size) - 1,
-		ptr:      int(size) - 1,
-		count:    make([]uint8, size),
-		Overflow: make(chan bool, 16),
-	}
+	a := &Any255Base{Newfix64base(0), 0, make([]uint8, size)}
+	a.size = size
+	a.last = a.size - 1
+	a.ptr = a.size - 1
+	return a
 }
 
-// reset to up flow or down flow
-// over == true, fill to zero
-// over == false, fill to MAX
-func (a *Any255Base) reset(over bool) {
-	for ptr := 0; ptr <= a.last; ptr++ {
-		if over {
-			// up flow
-			a.count[ptr] = 0
-		} else {
-			a.count[ptr] = math.MaxUint8
-		}
-	}
-	if over {
-		// up flow
-		a.ptr = a.last
-	} else {
-		// down flow
-		a.ptr = 0
-	}
-	// clean up
-	for len(a.Overflow) > 0 {
-		<-a.Overflow
-	}
-	a.Overflow <- over
+//
+func (a *Any255Base) String() string {
+	bigNum := big.NewInt(0).SetBytes(a.Bytes())
+	return bigNum.String()
 }
 
 // Plus do ++
-func (a *Any255Base) Plus() {
+func (a *Any255Base) Plus() error {
 	ptr := a.last
 	for {
 		if a.count[ptr] == math.MaxUint8 {
@@ -818,8 +995,9 @@ func (a *Any255Base) Plus() {
 			ptr--
 			if ptr == -1 {
 				// overflow
-				a.reset(true)
+				a.Reset(true)
 				ptr = a.last
+				return fmt.Errorf("Plus cross max %d, reset to zero", a.max)
 			}
 			continue
 		}
@@ -827,17 +1005,18 @@ func (a *Any255Base) Plus() {
 		if ptr < a.ptr {
 			a.ptr = ptr
 		}
-		return
+		return nil
 	}
 }
 
 // Mimus do --
-func (a *Any255Base) Mimus() {
+func (a *Any255Base) Mimus() error {
 	for {
 		if a.count[a.last] == 0 {
 			if a.ptr == a.last {
 				// overflow
-				a.reset(false)
+				a.Reset(false)
+				return fmt.Errorf("Mimus cross zero, reset to max %d", a.max)
 			} else {
 				// a.ptr < a.last
 				a.count[a.last] = math.MaxUint8
@@ -857,33 +1036,22 @@ func (a *Any255Base) Mimus() {
 			}
 		} else {
 			a.count[a.last]--
-			return
+			return nil
 		}
 	}
 }
 
 // FillBytes fill binary bytes of number
 func (a *Any255Base) FillBytes(p []byte) []byte {
-	fptr := len(p) - 1
-	for ptr := a.last; ptr >= 0 && fptr >= 0; ptr-- {
-		p[fptr] = byte(a.count[ptr])
-		fptr--
-	}
-	return p
-}
-
-// Bytes return binary Bytes of number
-func (a *Any255Base) Bytes() []byte {
-	return a.FillBytes(make([]byte, a.last+1))
-}
-
-// FillMapBytes to p Bytes []byte
-func (a *Any255Base) FillMapBytes(p []byte) []byte {
-	tmp := a.Bytes()
-	step := len(p) / len(tmp)
-	if step == 0 {
-		copy(p, tmp)
+	if len(p) <= a.size {
+		fptr := len(p) - 1
+		for ptr := a.last; ptr >= 0 && fptr >= 0; ptr-- {
+			p[fptr] = byte(a.count[ptr])
+			fptr--
+		}
 	} else {
+		tmp := a.Bytes()
+		step := len(p) / len(tmp)
 		for i := 0; i < len(tmp); i++ {
 			p[i*step] = tmp[i]
 		}
@@ -891,16 +1059,42 @@ func (a *Any255Base) FillMapBytes(p []byte) []byte {
 	return p
 }
 
-// MapBytes to explen Bytes []byte
-func (a *Any255Base) MapBytes(explen int) []byte {
-	return a.FillMapBytes(make([]byte, explen))
+// Touint64 return uint64 of Any255Base
+func (a *Any255Base) Touint64() []uint64 {
+	buf := a.Bytes()
+	cnt := len(buf) / 8
+	if len(buf)%8 != 0 {
+		cnt++
+	}
+	allbytes := make([]byte, cnt*8)
+	copy(allbytes, buf)
+	u64 := make([]uint64, cnt)
+	for i := 0; i <= cnt; i++ {
+		u64[i], _ = binary.Uvarint(allbytes[i*8:])
+	}
+	return u64
 }
 
-// Touint64 return uint64 of Any255Base
-// if size of base > 8, return ony 8 bytes
-func (a *Any255Base) Touint64() uint64 {
-	u64, _ := binary.Uvarint(a.FillBytes(make([]byte, 8)))
-	return u64
+// Reset to up flow or down flow
+// over == true, fill to zero
+// over == false, fill to MAX
+func (a *Any255Base) Reset(over bool) {
+	fmt.Printf("reset %v when count %v\n", over, a.count)
+	for ptr := 0; ptr <= a.last; ptr++ {
+		if over {
+			// up flow
+			a.count[ptr] = 0
+		} else {
+			a.count[ptr] = math.MaxUint8
+		}
+	}
+	if over {
+		// up flow
+		a.ptr = a.last
+	} else {
+		// down flow
+		a.ptr = 0
+	}
 }
 
 ////TODO: /bin/ip monitor

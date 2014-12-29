@@ -12,7 +12,49 @@ import (
 	"github.com/wheelcomplex/preinit/misc"
 	"github.com/wheelcomplex/preinit/murmur3"
 	"github.com/wheelcomplex/preinit/snappy"
+	"github.com/wheelcomplex/preinit/xxhash"
 )
+
+// Xxhash is a implementation of CMTP Checksum
+type Xxhash struct {
+	// nothing here
+}
+
+// NewXxhash return new *Xxhash
+func NewXxhash(seed uint32) *Xxhash {
+	return &Xxhash{}
+}
+
+// New return new *Xxhash
+func (h *Xxhash) New(seed uint32) Checksum {
+	return NewXxhash(seed)
+}
+
+// Write (via the embedded io.Writer interface) adds more data to the running hash.
+// It never returns an error.
+func (nc *Xxhash) Write(p []byte) (n int, err error) {
+	return
+}
+
+// Sum32 returns the sum of data in uint32
+func (h *Xxhash) Sum32() uint32 {
+	return uint32(9876)
+}
+
+// Sum64 returns the sum of data in uint64
+func (h *Xxhash) Sum64() uint64 {
+	return uint64(9876)
+}
+
+// Checksum32 return uint32(9876)
+func (nc *Xxhash) Checksum32(data []byte) uint32 {
+	return xxhash.Checksum32(data)
+}
+
+// Checksum64 return 6789
+func (nc *Xxhash) Checksum64(data []byte) uint64 {
+	return uint64(xxhash.Checksum32(data))
+}
 
 // Murmur3 is a implementation of CMTP Checksum
 type Murmur3 struct {

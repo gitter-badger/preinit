@@ -761,7 +761,10 @@ func (ae *AES) Close() {
 }
 
 //
-type bigDoCounter interface {
+type BigCounter interface {
+
+	//
+	New() BigCounter
 
 	//
 	String() string
@@ -769,8 +772,13 @@ type bigDoCounter interface {
 	//
 	FillBytes(p []byte) []byte
 
+	FillExpBytes(p []byte) []byte
+
 	//
 	Bytes() []byte
+
+	//
+	ExpBytes(size int) []byte
 
 	//
 	Mimus() error
@@ -785,22 +793,28 @@ type bigDoCounter interface {
 	Size() int
 
 	//
+	Max() string
+
+	//
+	ToBigInt() *big.Int
+
+	//
 	Reset(over bool)
 }
 
 //
-type BigCounter struct {
-	w bigDoCounter
+type AnyBaseCounter struct {
+	w BigCounter
 }
 
-func NewBigCounter(size int) *BigCounter {
+func NewAnyBaseCounter(size int) *AnyBaseCounter {
 	if size < 0 {
 		size = -size
 	}
 	if size == 0 {
 		size = 1
 	}
-	bc := &BigCounter{}
+	bc := &AnyBaseCounter{}
 	if size <= 8 {
 		bc.w = Newfix64base(size)
 	} else {
@@ -810,38 +824,68 @@ func NewBigCounter(size int) *BigCounter {
 }
 
 //
-func (a *BigCounter) String() string {
+func (a *AnyBaseCounter) New() BigCounter {
+	return a.w.New()
+}
+
+//
+func (a *AnyBaseCounter) String() string {
 	return a.w.String()
 }
 
 //
-func (a *BigCounter) FillBytes(p []byte) []byte {
+func (a *AnyBaseCounter) ToBigInt() *big.Int {
+	return a.w.ToBigInt()
+}
+
+//
+func (a *AnyBaseCounter) Max() string {
+	return a.w.Max()
+}
+
+//
+func (a *AnyBaseCounter) FillBytes(p []byte) []byte {
 	return a.w.FillBytes(p)
 }
 
 //
-func (a *BigCounter) Bytes() []byte {
+func (a *AnyBaseCounter) FillExpBytes(p []byte) []byte {
+	return a.w.FillExpBytes(p)
+}
+
+//
+func (a *AnyBaseCounter) Bytes() []byte {
 	return a.w.Bytes()
 }
 
 //
-func (a *BigCounter) Mimus() error {
+func (a *AnyBaseCounter) ExpBytes(size int) []byte {
+	return a.w.ExpBytes(size)
+}
+
+//
+func (a *AnyBaseCounter) Mimus() error {
 	return a.w.Mimus()
 }
 
 //
-func (a *BigCounter) Plus() error {
+func (a *AnyBaseCounter) Plus() error {
 	return a.w.Plus()
 }
 
 //
-func (a *BigCounter) Touint64() []uint64 {
+func (a *AnyBaseCounter) Touint64() []uint64 {
 	return a.w.Touint64()
 }
 
 //
-func (a *BigCounter) Size() int {
+func (a *AnyBaseCounter) Size() int {
 	return a.w.Size()
+}
+
+//
+func (a *AnyBaseCounter) Reset(over bool) {
+	a.w.Reset(over)
 }
 
 //
@@ -872,47 +916,90 @@ func Newfix64base(size int) *fix64base {
 }
 
 //
+func (a *fix64base) New() BigCounter {
+	return Newfix64base(a.size)
+}
+
+//
 func (a *fix64base) String() string {
 	return fmt.Sprintf("%d", a.count)
+}
+
+//
+func (a *fix64base) Max() string {
+	return fmt.Sprintf("%d", a.max+1)
+}
+
+//
+func (a *fix64base) ToBigInt() *big.Int {
+	return big.NewInt(int64(a.count))
 }
 
 //
 func (a *fix64base) FillBytes(p []byte) []byte {
 	if len(p) == 0 {
 		return p
-	} else if len(p) == a.size {
-		for i := a.last; i >= 0; i-- {
-			a.disp = a.count
-			for j := 0; j < (a.last - i); j++ {
-				a.disp = a.disp >> 8
-			}
-			p[i] = uint8(a.disp)
-		}
-		/*
-			p[0] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8 >> 8 >> 8)
-			p[1] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8 >> 8)
-			p[2] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8)
-			p[3] = uint8(a.count >> 8 >> 8 >> 8 >> 8)
-			p[4] = uint8(a.count >> 8 >> 8 >> 8)
-			p[5] = uint8(a.count >> 8 >> 8)
-			p[6] = uint8(a.count >> 8)
-			p[7] = uint8(a.count)
-		*/
-	} else {
-		//println("fix64base FillBytes !=")
-		// if len(p) < a.size, will got last N bytes
-		tmp := a.Bytes()
-		step := len(p) / len(tmp)
-		for i := 0; i < len(tmp); i++ {
-			p[i*step] = tmp[i]
-		}
 	}
+	fptr := len(p) - 1
+	for i := a.last; i >= 0 && fptr >= 0; i-- {
+		a.disp = a.count
+		for j := 0; j < (a.last - i); j++ {
+			a.disp = a.disp >> 8
+		}
+		p[fptr] = uint8(a.disp)
+		fptr--
+	}
+	/*
+		p[0] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8 >> 8 >> 8)
+		p[1] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8 >> 8)
+		p[2] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8)
+		p[3] = uint8(a.count >> 8 >> 8 >> 8 >> 8)
+		p[4] = uint8(a.count >> 8 >> 8 >> 8)
+		p[5] = uint8(a.count >> 8 >> 8)
+		p[6] = uint8(a.count >> 8)
+		p[7] = uint8(a.count)
+	*/
+	return p
+}
+
+// FillExpBytes fill binary bytes of number
+func (a *fix64base) FillExpBytes(p []byte) []byte {
+	if len(p) == 0 {
+		return p
+	}
+	fptr := len(p) - 1
+	step := fptr / a.size
+	for i := a.last; i >= 0 && fptr >= 0; i-- {
+		a.disp = a.count
+		for j := 0; j < (a.last - i); j++ {
+			a.disp = a.disp >> 8
+		}
+		p[fptr] = uint8(a.disp)
+		fptr = fptr - step
+	}
+	/*
+		p[0] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8 >> 8 >> 8)
+		p[1] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8 >> 8)
+		p[2] = uint8(a.count >> 8 >> 8 >> 8 >> 8 >> 8)
+		p[3] = uint8(a.count >> 8 >> 8 >> 8 >> 8)
+		p[4] = uint8(a.count >> 8 >> 8 >> 8)
+		p[5] = uint8(a.count >> 8 >> 8)
+		p[6] = uint8(a.count >> 8)
+		p[7] = uint8(a.count)
+	*/
 	return p
 }
 
 //
 func (a *fix64base) Bytes() []byte {
-	return a.FillBytes(make([]byte, a.size))
+	buf := make([]byte, a.size)
+	return a.FillBytes(buf)
+}
+
+//
+func (a *fix64base) ExpBytes(size int) []byte {
+	buf := make([]byte, size)
+	return a.FillExpBytes(buf)
 }
 
 //
@@ -981,9 +1068,31 @@ func NewAny255Base(size int) *Any255Base {
 }
 
 //
+func (a *Any255Base) New() BigCounter {
+	return NewAny255Base(a.size)
+}
+
+//
 func (a *Any255Base) String() string {
 	bigNum := big.NewInt(0).SetBytes(a.Bytes())
 	return bigNum.String()
+}
+
+//
+func (a *Any255Base) Max() string {
+	onebig := big.NewInt(1)
+	maxbuf := make([]byte, a.size)
+	for i := 0; i < a.size; i++ {
+		maxbuf[i] = byte(0xff)
+	}
+	bigNum := big.NewInt(0).SetBytes(maxbuf)
+	bigNum = bigNum.Add(bigNum, onebig)
+	return bigNum.String()
+}
+
+//
+func (a *Any255Base) ToBigInt() *big.Int {
+	return big.NewInt(0).SetBytes(a.Bytes())
 }
 
 // Plus do ++
@@ -1041,20 +1150,43 @@ func (a *Any255Base) Mimus() error {
 	}
 }
 
+func (a *Any255Base) Bytes() []byte {
+	buf := make([]byte, a.size)
+	return a.FillBytes(buf)
+}
+
+//
+func (a *Any255Base) ExpBytes(size int) []byte {
+	buf := make([]byte, size)
+	return a.FillExpBytes(buf)
+}
+
 // FillBytes fill binary bytes of number
 func (a *Any255Base) FillBytes(p []byte) []byte {
-	if len(p) <= a.size {
-		fptr := len(p) - 1
-		for ptr := a.last; ptr >= 0 && fptr >= 0; ptr-- {
-			p[fptr] = byte(a.count[ptr])
-			fptr--
-		}
-	} else {
-		tmp := a.Bytes()
-		step := len(p) / len(tmp)
-		for i := 0; i < len(tmp); i++ {
-			p[i*step] = tmp[i]
-		}
+	if len(p) == 0 {
+		return p
+	}
+	fptr := len(p) - 1
+	for ptr := a.last; ptr >= 0 && fptr >= 0; ptr-- {
+		p[fptr] = byte(a.count[ptr])
+		fptr--
+	}
+	return p
+}
+
+// FillExpBytes fill binary bytes of number
+func (a *Any255Base) FillExpBytes(p []byte) []byte {
+	if len(p) == 0 {
+		return p
+	}
+	fptr := len(p) - 1
+	step := fptr / a.size
+	if step <= 0 {
+		step = 1
+	}
+	for ptr := a.last; ptr >= 0 && fptr >= 0; ptr-- {
+		p[fptr] = byte(a.count[ptr])
+		fptr = fptr - step
 	}
 	return p
 }

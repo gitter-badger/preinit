@@ -772,6 +772,7 @@ type BigCounter interface {
 	//
 	FillBytes(p []byte) []byte
 
+	//
 	FillExpBytes(p []byte) []byte
 
 	//
@@ -782,6 +783,17 @@ type BigCounter interface {
 
 	//
 	Mimus() error
+
+	// Cmp compares x and y and returns:
+	//
+	//   -1 if a <  y
+	//    0 if a == y
+	//   +1 if a >  y
+	//
+	Cmp(b BigCounter) int
+
+	//
+	Mul(m uint64) error
 
 	//
 	Plus() error
@@ -797,6 +809,9 @@ type BigCounter interface {
 
 	//
 	ToBigInt() *big.Int
+
+	//
+	FromBigInt(b *big.Int)
 
 	//
 	Reset(over bool)
@@ -839,6 +854,11 @@ func (a *AnyBaseCounter) ToBigInt() *big.Int {
 }
 
 //
+func (a *AnyBaseCounter) FromBigInt(b *big.Int) {
+	a.w.FromBigInt(b)
+}
+
+//
 func (a *AnyBaseCounter) Max() string {
 	return a.w.Max()
 }
@@ -866,6 +886,15 @@ func (a *AnyBaseCounter) ExpBytes(size int) []byte {
 //
 func (a *AnyBaseCounter) Mimus() error {
 	return a.w.Mimus()
+}
+
+func (a *AnyBaseCounter) Cmp(b BigCounter) int {
+	return a.w.Cmp(b)
+}
+
+//
+func (a *AnyBaseCounter) Mul(m uint64) error {
+	return a.w.Mul(m)
 }
 
 //
@@ -928,6 +957,66 @@ func (a *fix64base) String() string {
 //
 func (a *fix64base) Max() string {
 	return fmt.Sprintf("%d", a.max+1)
+}
+
+// Cmp compares x and y and returns:
+//
+//   -1 if a <  y
+//    0 if a == y
+//   +1 if a >  y
+//
+func (a *fix64base) Cmp(b BigCounter) int {
+	if ab, ok := b.(*fix64base); ok {
+		return a.cmp(ab)
+	}
+	a64 := a.Bytes()
+	aptr := 0
+	for aptr == 0 && aptr < len(a64) {
+		aptr = bytes.IndexByte(a64[aptr:], byte(0))
+	}
+	b64 := b.Bytes()
+	bptr := 0
+	for bptr == 0 && bptr < len(b64) {
+		bptr = bytes.IndexByte(b64[bptr:], byte(0))
+	}
+	if aptr < bptr {
+		return -1
+	}
+	if aptr > bptr {
+		return 1
+	}
+	for i := 0; i <= aptr; i++ {
+		if a64[i] < b64[i] {
+			return -1
+		}
+		if a64[i] > b64[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+// Cmp compares x and y and returns:
+//
+//   -1 if a <  y
+//    0 if a == y
+//   +1 if a >  y
+func (a *fix64base) cmp(b *fix64base) int {
+	if a.count < b.count {
+		return -1
+	}
+	if a.count == b.count {
+		return 0
+	}
+	return 1
+}
+
+//
+func (a *fix64base) FromBigInt(b *big.Int) {
+	// Uint64 returns the uint64 representation of x.
+	// If x cannot be represented in a uint64, the result is undefined.
+	// func (x *Int) Uint64() uint64
+	a.count = b.Uint64()
 }
 
 //
@@ -1013,6 +1102,22 @@ func (a *fix64base) Mimus() error {
 }
 
 //
+func (a *fix64base) Mul(m uint64) error {
+	// counter == 0
+	if a.count == 0 {
+		return nil
+	}
+	for i := uint64(0); i < m; i++ {
+		if a.count == a.max {
+			a.Reset(true)
+			return fmt.Errorf("Plus cross max %d, reset to zero", a.max)
+		}
+		a.count++
+	}
+	return nil
+}
+
+//
 func (a *fix64base) Plus() error {
 	if a.count == a.max {
 		a.Reset(true)
@@ -1091,8 +1196,122 @@ func (a *Any255Base) Max() string {
 }
 
 //
+func (a *Any255Base) FromBigInt(b *big.Int) {
+	// Bytes returns the absolute value of x as a big-endian byte slice.
+	// func (x *Int) Bytes() []byte
+	buf := b.Bytes()
+	blen := len(buf)
+	/*
+		fptr := len(p) - 1
+		for ptr := a.last; ptr >= 0 && fptr >= 0; ptr-- {
+			p[fptr] = byte(a.count[ptr])
+			fptr--
+		}
+	*/
+	ptr := a.last
+	for i := 0; i < blen && ptr >= 0; i++ {
+		a.count[ptr] = buf[i]
+		ptr--
+	}
+	a.ptr = ptr
+}
+
+//
 func (a *Any255Base) ToBigInt() *big.Int {
 	return big.NewInt(0).SetBytes(a.Bytes())
+}
+
+// Cmp compares x and y and returns:
+//
+//   -1 if a <  y
+//    0 if a == y
+//   +1 if a >  y
+//
+func (a *Any255Base) Cmp(b BigCounter) int {
+	if ab, ok := b.(*Any255Base); ok {
+		return a.cmp(ab)
+	}
+	a64 := a.Bytes()
+	aptr := 0
+	for aptr == 0 && aptr < len(a64) {
+		aptr = bytes.IndexByte(a64[aptr:], byte(0))
+	}
+	b64 := b.Bytes()
+	bptr := 0
+	for bptr == 0 && bptr < len(b64) {
+		bptr = bytes.IndexByte(b64[bptr:], byte(0))
+	}
+	if aptr < bptr {
+		return -1
+	}
+	if aptr > bptr {
+		return 1
+	}
+	for i := 0; i <= aptr; i++ {
+		if a64[i] < b64[i] {
+			return -1
+		}
+		if a64[i] > b64[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+// Cmp compares x and y and returns:
+//
+//   -1 if a <  y
+//    0 if a == y
+//   +1 if a >  y
+//
+func (a *Any255Base) cmp(b *Any255Base) int {
+	// a < b
+	if a.ptr > b.ptr {
+		return -1
+	}
+	// a > b
+	if a.ptr < b.ptr {
+		return 1
+	}
+	// a.ptr == b.ptr
+	for ptr := 0; ptr <= a.ptr; ptr++ {
+		if a.count[ptr] < b.count[ptr] {
+			return -1
+		}
+		if a.count[ptr] > b.count[ptr] {
+			return 1
+		}
+	}
+	return 0
+}
+
+// Mul do a*m
+func (a *Any255Base) Mul(m uint64) error {
+	// counter == 0
+	if a.count[a.last] == 0 && a.last == a.ptr {
+		return nil
+	}
+	ptr := a.last
+	for i := uint64(0); i < m; i++ {
+		for {
+			if a.count[ptr] == math.MaxUint8 {
+				a.count[ptr] = 0
+				ptr--
+				if ptr == -1 {
+					// overflow
+					a.Reset(true)
+					ptr = a.last
+					return fmt.Errorf("Plus cross max %d, reset to zero", a.max)
+				}
+				continue
+			}
+			a.count[ptr]++
+			if ptr < a.ptr {
+				a.ptr = ptr
+			}
+		}
+	}
+	return nil
 }
 
 // Plus do ++

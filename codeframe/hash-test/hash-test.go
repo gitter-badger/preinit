@@ -45,7 +45,6 @@ type hashTester struct {
 	limit       *time.Ticker      //
 	closed      chan struct{}     //
 	closing     chan struct{}     //
-	wg          sync.WaitGroup    //
 	maxproc     int               //
 	lock        bool              //
 	closedflag  bool              //
@@ -71,13 +70,14 @@ func NewhashTester(size int, gen misc.BigCounter, hash cmtp.Checksum, groupsize 
 	maxcnt, _ := big.NewInt(0).SetString(gen.Max(), 10)
 	//fmt.Printf("gen.Size() %d, gen.Max() = %s || %x => %s || %x\n", gen.Size(), gen.Max(), gen.Bytes(), maxcnt.String(), maxcnt.Bytes())
 
-	initpoolsize := uint64(size) * 10000
+	//initpoolsize := uint64(size) * 20000
+	initpoolsize := uint64(size) * 128
 	pool := make([]byteHash, initpoolsize)
-	chunksize := initpoolsize / 100
+	chunksize := initpoolsize / uint64(maxproc*2)
 	if chunksize < uint64(size) {
 		chunksize = uint64(size)
 	}
-	println("initpoolsize", initpoolsize, "batch length", chunksize)
+	//println("initpoolsize", initpoolsize, "batch length", chunksize)
 	chunkptr := uint64(0)
 	var chunk []uint64
 	idleblocks := make(chan []uint64, initpoolsize*10)
@@ -148,12 +148,13 @@ func NewhashTester(size int, gen misc.BigCounter, hash cmtp.Checksum, groupsize 
 	i := ht.maxproc - 1
 	ht.generators[i].SetMax(ht.maxcnt.Bytes())
 	//println("generator#", i, "start from", ht.generators[i].String(), "end at", ht.generators[i].Max())
-	go ht.closer()
-	//go ht.genbuf()
-	go ht.counter()
-	go ht.procbuf()
 	// initial stat
 	ht.Stat()
+	go ht.closer()
+	go ht.counter()
+	go ht.genprocbuf()
+	//go ht.genbuf()
+	//go ht.procbuf()
 	return ht
 }
 
@@ -175,7 +176,67 @@ func (ht *hashTester) closer() {
 	}
 }
 
-/*
+//
+func (ht *hashTester) genprocbuf() {
+	defer func() {
+		// all done, close
+		close(ht.countblocks)
+		ht.limit.Stop()
+	}()
+	var wg sync.WaitGroup
+	//cnt := int(float32(ht.maxproc)*2/5) + 1
+	// one generator is fast enough, share cpu with counter
+	cnt := ht.maxproc
+	//println("lauch", cnt, "dogen")
+	for i := 0; i < cnt; i++ {
+		wg.Add(1)
+		go ht.dogenproc(i, &wg)
+		//time.Sleep(1)
+	}
+	wg.Wait()
+	//misc.Tpf(fmt.Sprintln("end", cnt, "dogen"))
+}
+
+//
+func (ht *hashTester) dogenproc(i int, wg *sync.WaitGroup) {
+	defer func() {
+		wg.Done()
+	}()
+	if ht.lock {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+	}
+	var buf []uint64
+	var closing bool
+	for ht.closedflag == false {
+		buf = <-ht.idleblocks
+		for idx, _ := range buf {
+			pidx := buf[idx]
+			if ht.pool[pidx].buf == nil || closing == true {
+				// mark/skip unused item
+				ht.pool[pidx].buf = nil
+			} else {
+				ht.generators[i].FillExpBytes(ht.pool[pidx].buf)
+				ht.pool[pidx].num = ht.hashs[i].Checksum32(ht.pool[pidx].buf)
+				//last = ht.generators[i].String()
+				//fmt.Printf("G: %s, %d, %x\n", ht.generators[i].String(), ht.pool[pidx].num, ht.pool[pidx].buf)
+				if err := ht.generators[i].Plus(); err != nil {
+					//misc.Tpf(fmt.Sprintln("generator#", i, "exiting, current", ht.generators[i].String(), "end at", ht.generators[i].Max()))
+					closing = true
+				}
+			}
+		}
+
+		// ht.countblocks <- buf
+		select {
+		case ht.countblocks <- buf:
+		default:
+			println("ht.countblocks <- buf blocking")
+			ht.countblocks <- buf
+		}
+	}
+}
+
 //
 func (ht *hashTester) genbuf() {
 	defer func() {
@@ -183,25 +244,45 @@ func (ht *hashTester) genbuf() {
 		close(ht.procblocks)
 		ht.limit.Stop()
 	}()
+	var wg sync.WaitGroup
+	//cnt := int(float32(ht.maxproc)*2/5) + 1
+	// one generator is fast enough, share cpu with counter
+	cnt := 1
+	//println("lauch", cnt, "dogen")
+	for i := 0; i < cnt; i++ {
+		wg.Add(1)
+		go ht.dogen(i, &wg)
+		//time.Sleep(1)
+	}
+	wg.Wait()
+	//misc.Tpf(fmt.Sprintln("end", cnt, "dogen"))
+}
+
+//
+func (ht *hashTester) dogen(i int, wg *sync.WaitGroup) {
+	defer func() {
+		wg.Done()
+	}()
 	if ht.lock {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 	}
 	var buf []uint64
+	var closing bool
 	for ht.closedflag == false {
 		buf = <-ht.idleblocks
 		for idx, _ := range buf {
 			pidx := buf[idx]
-			if closing == true {
-				// mark unused item
+			if ht.pool[pidx].buf == nil || closing == true {
+				// mark/skip unused item
 				ht.pool[pidx].buf = nil
 			} else {
 				ht.generators[i].FillExpBytes(ht.pool[pidx].buf)
-				//fmt.Printf("G: %x\n", ht.pool[pidx].buf)
-				// over flow check
+				//last = ht.generators[i].String()
+				//fmt.Printf("G: %s, %d, %x\n", ht.generators[i].String(), ht.pool[pidx].num, ht.pool[pidx].buf)
 				if err := ht.generators[i].Plus(); err != nil {
-					//fmt.Printf("stop for %s\n", err)
-					ht.closedflag = true
+					//misc.Tpf(fmt.Sprintln("generator#", i, "exiting, current", ht.generators[i].String(), "end at", ht.generators[i].Max()))
+					closing = true
 				}
 			}
 		}
@@ -210,36 +291,50 @@ func (ht *hashTester) genbuf() {
 
 	}
 }
-*/
 
-func (ht *hashTester) dohash(i int) {
+func (ht *hashTester) procbuf() {
+	defer func() {
+		close(ht.countblocks)
+	}()
+	var wg sync.WaitGroup
+	// cnt := int(float32(ht.maxproc)*2/5) + 1
+	// hash is slow, using more cpus
+	cnt := ht.maxproc - 1
+	if cnt < 1 {
+		cnt = 1
+	}
+	//println("lauch", cnt, "hasher")
+	for i := 0; i < cnt; i++ {
+		wg.Add(1)
+		go ht.dohash(i, &wg)
+		//time.Sleep(1)
+	}
+	wg.Wait()
+	ht.endts = time.Now()
+	//misc.Tpf(fmt.Sprintln("end", cnt, "hasher"))
+}
+
+func (ht *hashTester) dohash(i int, wg *sync.WaitGroup) {
 	defer func() {
 		//println("hasher", i, "exited")
-		ht.wg.Done()
+		wg.Done()
 	}()
 	if ht.lock {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 	}
-	misc.Tpf(fmt.Sprintln("generator#", i, "start from", ht.generators[i].String(), "end at", ht.generators[i].Max(), "\n"))
+	//println("hasher", i, "started")
 	var buf []uint64
-	var closing bool
-	for ht.closedflag == false && closing == false {
-		buf = <-ht.idleblocks
+	for buf = range ht.procblocks {
 		for idx, _ := range buf {
 			pidx := buf[idx]
-			if ht.closedflag == true || closing == true {
-				// mark unused item
-				ht.pool[pidx].buf = nil
+			if ht.pool[pidx].buf == nil {
+				// skip unused item
+				continue
 			} else {
-				ht.generators[i].FillExpBytes(ht.pool[pidx].buf)
 				ht.pool[pidx].num = ht.hashs[i].Checksum32(ht.pool[pidx].buf)
 				//last = ht.generators[i].String()
 				//fmt.Printf("G: %s, %d, %x\n", ht.generators[i].String(), ht.pool[pidx].num, ht.pool[pidx].buf)
-				if err := ht.generators[i].Plus(); err != nil {
-					misc.Tpf(fmt.Sprintln("generator#", i, "exiting, current", ht.generators[i].String(), "end at", ht.generators[i].Max()))
-					closing = true
-				}
 			}
 		}
 
@@ -248,25 +343,9 @@ func (ht *hashTester) dohash(i int) {
 	}
 }
 
-func (ht *hashTester) procbuf() {
-	defer func() {
-		ht.limit.Stop()
-		close(ht.countblocks)
-	}()
-	//println("lauch", ht.maxproc, "hasher")
-	for i := 0; i < ht.maxproc; i++ {
-		ht.wg.Add(1)
-		go ht.dohash(i)
-		time.Sleep(1)
-	}
-	ht.wg.Wait()
-	ht.endts = time.Now()
-	//misc.Tpf(fmt.Sprintln("end", ht.maxproc, "hasher"))
-}
-
 func (ht *hashTester) counter() {
 	defer func() {
-		println("counter exited")
+		//println("counter exited")
 		ht.Close()
 	}()
 	if ht.lock {
@@ -294,7 +373,13 @@ func (ht *hashTester) counter() {
 		}
 		ht.count.AddUint64(bcount)
 
-		ht.idleblocks <- buf
+		//ht.idleblocks <- buf
+		select {
+		case ht.idleblocks <- buf:
+		default:
+			println("ht.idleblocks <- buf blocking")
+			ht.idleblocks <- buf
+		}
 
 	}
 }
@@ -335,19 +420,19 @@ func (ht *hashTester) Close() {
 	default:
 		close(ht.closing)
 	}
-	misc.Tpf(fmt.Sprintln("closing"))
+	//misc.Tpf(fmt.Sprintln("closing"))
 	//ht.Result()
 	ht.hashs = nil
 	ht.results = nil
 	ht.pool = nil
 	//ht.collided = nil
 	//ht.distr = nil
-	misc.Tpf(fmt.Sprintln("GC"))
+	//misc.Tpf(fmt.Sprintln("GC"))
 	runtime.GC()
-	misc.Tpf(fmt.Sprintln("FreeMemory"))
+	//misc.Tpf(fmt.Sprintln("FreeMemory"))
 	debug.FreeOSMemory()
 	close(ht.closed)
-	misc.Tpf(fmt.Sprintln("closed"))
+	//misc.Tpf(fmt.Sprintln("closed"))
 }
 
 // Result return distr/collided map

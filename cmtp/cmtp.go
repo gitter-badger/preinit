@@ -446,7 +446,7 @@ type CodecMixer struct {
 	ssid           uint64                      // ssid counter
 	mutex          sync.Mutex                  // common lock
 	token          uint64                      // token id
-	aes            *misc.AES                   // crypter for handshake
+	aes            *keyaes.AES                 // crypter for handshake
 	key            []byte                      //
 	ioFreeCh       chan *mixerFrame            // idle frame
 	encodeCh       chan *mixerFrame            // encode frame
@@ -480,7 +480,7 @@ func newCodecMixer(token uint64, codec Codec, checksum Checksum, filter Filter) 
 	tf := &CodecMixer{
 		ssid:           INIT_SSID,
 		token:          token,
-		aes:            misc.NewAES(key),
+		aes:            keyaes.NewAES(key, nil),
 		key:            key,
 		ioFreeCh:       make(chan *mixerFrame, chansize*2),
 		encodeCh:       make(chan *mixerFrame, chansize),

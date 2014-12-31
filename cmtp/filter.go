@@ -13,6 +13,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/wheelcomplex/preinit/keyaes"
 	"github.com/wheelcomplex/preinit/misc"
 )
 
@@ -77,7 +78,7 @@ const MAX_DIALTIME time.Duration = 15e9
 // initial header will encrypt by aes
 type TCPFilter struct {
 	ssid       uint64        //
-	aes        *misc.AES     // aes use for dst info crypt
+	aes        *keyaes.AES   // aes use for dst info crypt
 	dstinfo    string        //
 	hdrlen     int           // header len for marshal header
 	encryptlen uint32        // stream initial info length after encrypt(without prefix header)
@@ -94,7 +95,7 @@ func NewTCPFilter(key []byte, dstinfo string) *TCPFilter {
 		dstinfo = dstinfo[:MAX_HEADERLEN]
 	}
 	tf := &TCPFilter{
-		aes:     misc.NewAES(key),
+		aes:     keyaes.NewAES(key, nil),
 		in:      newTcpStream(),
 		out:     newTcpStream(),
 		dstinfo: dstinfo,

@@ -52,6 +52,9 @@ type AES struct {
 // recommad hash is murmur3.New32()
 func NewAES(key []byte, hash hash.Hash32) *AES {
 	var err error
+	if hash == nil {
+		hash = fnv.New32a()
+	}
 	ae := &AES{
 		hash: hash,
 	}

@@ -23,31 +23,32 @@ type byteHash struct {
 }
 
 type hashTester struct {
-	size        uint32          //
-	groupsize   uint32          //
-	generator   misc.BigCounter //
-	pool        []byteHash      //
-	poollast    uint64          //
-	idleblocks  chan []uint64   //
-	procblocks  chan []uint64   //
-	countblocks chan []uint64   //
-	hashs       []cmtp.Checksum //
-	count       misc.BigCounter //
-	maxcnt      *big.Int        //
-	bigSecond   *big.Int        //
-	results     []uint16        // all hash info
-	distr       []uint16        // index by math.MaxUint32 % groupsize
-	collided    []uint16        // index by math.MaxUint32 % groupsize
-	startts     time.Time       //
-	endts       time.Time       //
-	esp         *big.Int        //
-	qps         *big.Int        //
-	limit       *time.Ticker    //
-	closed      chan struct{}   //
-	closing     chan struct{}   //
-	wg          sync.WaitGroup  //
-	maxgo       int             //
-	lock        bool
+	size        uint32            //
+	groupsize   uint32            //
+	generators  []misc.BigCounter //
+	pool        []byteHash        //
+	poollast    uint64            //
+	idleblocks  chan []uint64     //
+	procblocks  chan []uint64     //
+	countblocks chan []uint64     //
+	hashs       []cmtp.Checksum   //
+	count       misc.BigCounter   //
+	maxcnt      *big.Int          //
+	bigSecond   *big.Int          //
+	results     []uint16          // all hash info
+	distr       []uint16          // index by math.MaxUint32 % groupsize
+	collided    []uint16          // index by math.MaxUint32 % groupsize
+	startts     time.Time         //
+	endts       time.Time         //
+	esp         *big.Int          //
+	qps         *big.Int          //
+	limit       *time.Ticker      //
+	closed      chan struct{}     //
+	closing     chan struct{}     //
+	wg          sync.WaitGroup    //
+	maxproc     int               //
+	lock        bool              //
+	closedflag  bool              //
 }
 
 //
@@ -58,7 +59,17 @@ func NewhashTester(size int, gen misc.BigCounter, hash cmtp.Checksum, groupsize 
 	if groupsize == 0 {
 		groupsize = 4096
 	}
+	if limit <= 0 {
+		limit = math.MaxUint32
+	}
+	maxproc := runtime.GOMAXPROCS(-1) - 1
+	// -1, reserve one cpu for commond task and counter
+	if maxproc < 1 {
+		maxproc = 1
+	}
+
 	maxcnt, _ := big.NewInt(0).SetString(gen.Max(), 10)
+	//fmt.Printf("gen.Size() %d, gen.Max() = %s || %x => %s || %x\n", gen.Size(), gen.Max(), gen.Bytes(), maxcnt.String(), maxcnt.Bytes())
 
 	initpoolsize := uint64(size) * 10000
 	pool := make([]byteHash, initpoolsize)
@@ -91,23 +102,17 @@ func NewhashTester(size int, gen misc.BigCounter, hash cmtp.Checksum, groupsize 
 	//for i := uint64(0); i < initpoolsize; i++ {
 	//	idleblocks <- uint64(i)
 	//}
-	if limit <= 0 {
-		limit = math.MaxUint32
-	}
-	maxgo := runtime.GOMAXPROCS(-1) - 1
-	if maxgo < 1 {
-		maxgo = 1
-	}
+
 	ht := &hashTester{
 		size:        uint32(size),
 		groupsize:   groupsize,
-		generator:   gen.New(),
 		pool:        pool,
 		poollast:    initpoolsize - 1,
 		idleblocks:  idleblocks,
 		procblocks:  make(chan []uint64, size*100),
 		countblocks: make(chan []uint64, initpoolsize),
-		hashs:       make([]cmtp.Checksum, maxgo),
+		generators:  make([]misc.BigCounter, maxproc),
+		hashs:       make([]cmtp.Checksum, maxproc),
 		count:       gen.New(),
 		maxcnt:      maxcnt,
 		bigSecond:   big.NewInt(int64(time.Second)),
@@ -120,13 +125,31 @@ func NewhashTester(size int, gen misc.BigCounter, hash cmtp.Checksum, groupsize 
 		closed:      make(chan struct{}, 128),
 		closing:     make(chan struct{}, 128),
 		limit:       time.NewTicker(time.Duration(limit) * time.Second),
-		maxgo:       maxgo,
+		maxproc:     maxproc,
 		lock:        lock,
 	}
-	for i := 0; i < ht.maxgo; i++ {
+	//
+	genstep := big.NewInt(0)
+	genstep = genstep.Div(ht.maxcnt, big.NewInt(int64(ht.maxproc)))
+	genptr := big.NewInt(0)
+	for i := 0; i < ht.maxproc; i++ {
 		ht.hashs[i] = hash.New(0)
+		ht.generators[i] = gen.New()
+		//ht.generators[i].FromBigInt(genptr)
+		ht.generators[i].SetInit(genptr.Bytes())
+		endptr := ht.generators[i].New()
+		endptr.FromBigInt(big.NewInt(1).Mul(genstep, big.NewInt(int64(i+1))))
+		endptr.Mimus()
+		ht.generators[i].SetMax(endptr.Bytes())
+		//println("generator#", i, "start from", ht.generators[i].String(), "end at", ht.generators[i].Max())
+		genptr = genptr.Add(genptr, genstep)
 	}
-	go ht.genbuf()
+	// update last generator
+	i := ht.maxproc - 1
+	ht.generators[i].SetMax(ht.maxcnt.Bytes())
+	//println("generator#", i, "start from", ht.generators[i].String(), "end at", ht.generators[i].Max())
+	go ht.closer()
+	//go ht.genbuf()
 	go ht.counter()
 	go ht.procbuf()
 	// initial stat
@@ -135,140 +158,115 @@ func NewhashTester(size int, gen misc.BigCounter, hash cmtp.Checksum, groupsize 
 }
 
 //
+func (ht *hashTester) closer() {
+	select {
+	case <-ht.limit.C:
+		fmt.Printf("%s\n", "stop for reach time limit")
+		ht.closedflag = true
+		return
+	case <-ht.closing:
+		fmt.Printf("%s\n", "stop for closing")
+		ht.closedflag = true
+		return
+	case <-ht.closed:
+		fmt.Printf("%s\n", "stop for closed")
+		ht.closedflag = true
+		return
+	}
+}
+
+/*
+//
 func (ht *hashTester) genbuf() {
 	defer func() {
 		// all done, close
 		close(ht.procblocks)
 		ht.limit.Stop()
 	}()
-	var closing bool
-	go func() {
-		select {
-		case <-ht.limit.C:
-			//fmt.Printf("%s\n", "stop for reach time limit")
-			closing = true
-			return
-		case <-ht.closing:
-			//fmt.Printf("%s\n", "stop for closing")
-			closing = true
-			return
-		}
-	}()
 	if ht.lock {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 	}
-	//newcnt := 0
-	//tk := time.NewTicker(1e9)
-	//defer tk.Stop()
-	//go func() {
-	//	for _ = range tk.C {
-	//		if newcnt > 0 {
-	//			println("new item qps:", newcnt)
-	//			newcnt = 0
-	//		}
-	//	}
-	//}()
 	var buf []uint64
-	for closing == false {
+	for ht.closedflag == false {
 		buf = <-ht.idleblocks
-		//select {
-		//case buf = <-ht.idleblocks:
-		//	//println("got idle buf", buf)
-		//default:
-		//	if ht.poollast == math.MaxUint64 {
-		//		println("blocked in buf = <-ht.idleblocks for ", ht.poollast)
-		//		buf = <-ht.idleblocks
-		//	} else {
-		//		newitem := byteHash{
-		//			num: 0,
-		//			buf: make([]byte, ht.size),
-		//		}
-		//		ht.poollast++
-		//		ht.pool = append(ht.pool, newitem)
-		//		buf = ht.poollast
-		//		//println("add new buf", buf)
-		//		newcnt++
-		//	}
-		//}
 		for idx, _ := range buf {
 			pidx := buf[idx]
 			if closing == true {
 				// mark unused item
 				ht.pool[pidx].buf = nil
 			} else {
-				ht.generator.FillExpBytes(ht.pool[pidx].buf)
+				ht.generators[i].FillExpBytes(ht.pool[pidx].buf)
 				//fmt.Printf("G: %x\n", ht.pool[pidx].buf)
 				// over flow check
-				if err := ht.generator.Plus(); err != nil {
+				if err := ht.generators[i].Plus(); err != nil {
 					//fmt.Printf("stop for %s\n", err)
-					closing = true
+					ht.closedflag = true
 				}
 			}
 		}
 
 		ht.procblocks <- buf
 
-		//select {
-		//case ht.procblocks <- buf:
-		//default:
-		//	println("ht.procblocks <- buf blocking", buf)
-		//	ht.procblocks <- buf
-		//}
-
-		//// over flow check
-		//if err := ht.generator.Plus(); err != nil {
-		//	//fmt.Printf("stop for %s\n", err)
-		//	return
-		//}
 	}
 }
+*/
 
-func (ht *hashTester) dohash(cnt int) {
-	defer ht.wg.Done()
+func (ht *hashTester) dohash(i int) {
+	defer func() {
+		//println("hasher", i, "exited")
+		ht.wg.Done()
+	}()
 	if ht.lock {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 	}
-	for buf := range ht.procblocks {
+	misc.Tpf(fmt.Sprintln("generator#", i, "start from", ht.generators[i].String(), "end at", ht.generators[i].Max(), "\n"))
+	var buf []uint64
+	var closing bool
+	for ht.closedflag == false && closing == false {
+		buf = <-ht.idleblocks
 		for idx, _ := range buf {
 			pidx := buf[idx]
-			if ht.pool[pidx].buf == nil {
-				continue
+			if ht.closedflag == true || closing == true {
+				// mark unused item
+				ht.pool[pidx].buf = nil
+			} else {
+				ht.generators[i].FillExpBytes(ht.pool[pidx].buf)
+				ht.pool[pidx].num = ht.hashs[i].Checksum32(ht.pool[pidx].buf)
+				//last = ht.generators[i].String()
+				//fmt.Printf("G: %s, %d, %x\n", ht.generators[i].String(), ht.pool[pidx].num, ht.pool[pidx].buf)
+				if err := ht.generators[i].Plus(); err != nil {
+					misc.Tpf(fmt.Sprintln("generator#", i, "exiting, current", ht.generators[i].String(), "end at", ht.generators[i].Max()))
+					closing = true
+				}
 			}
-			//fmt.Printf("H: %x\n", ht.pool[buf].buf)
-			ht.pool[pidx].num = ht.hashs[cnt].Checksum32(ht.pool[pidx].buf)
 		}
+
 		ht.countblocks <- buf
-		//select {
-		//case ht.countblocks <- buf:
-		//default:
-		//	println("ht.countblocks <- buf blocking", buf)
-		//	ht.countblocks <- buf
-		//}
+
 	}
 }
 
 func (ht *hashTester) procbuf() {
 	defer func() {
+		ht.limit.Stop()
 		close(ht.countblocks)
 	}()
-	maxgo := runtime.GOMAXPROCS(-1) - 2
-	if maxgo < 1 {
-		maxgo = 1
-	}
-	//println("lauch", maxgo, "hasher")
-	for i := 0; i < maxgo; i++ {
+	//println("lauch", ht.maxproc, "hasher")
+	for i := 0; i < ht.maxproc; i++ {
 		ht.wg.Add(1)
-		ht.dohash(i)
+		go ht.dohash(i)
+		time.Sleep(1)
 	}
 	ht.wg.Wait()
 	ht.endts = time.Now()
-	//println("end", maxgo, "hasher")
+	//misc.Tpf(fmt.Sprintln("end", ht.maxproc, "hasher"))
 }
 
 func (ht *hashTester) counter() {
 	defer func() {
+		println("counter exited")
 		ht.Close()
 	}()
 	if ht.lock {
@@ -283,10 +281,18 @@ func (ht *hashTester) counter() {
 			if ht.pool[pidx].buf == nil {
 				continue
 			}
+			//results     []uint16        // all hash info
+			//distr       []uint16        // index by math.MaxUint32 % groupsize
+			//collided    []uint16        // index by math.MaxUint32 % groupsize
+			ridx := uint32(ht.pool[pidx].num) % ht.groupsize
+			ht.distr[ridx]++
+			if ht.results[ht.pool[pidx].num] > 0 {
+				ht.collided[ridx]++
+			}
 			ht.results[ht.pool[pidx].num]++
 			bcount++
 		}
-		ht.count.Mul(bcount)
+		ht.count.AddUint64(bcount)
 
 		ht.idleblocks <- buf
 
@@ -303,6 +309,7 @@ func (ht *hashTester) Stat() (countstr, qps string, esp time.Duration) {
 	}
 	esp = ht.endts.Sub(ht.startts)
 	count := ht.count.ToBigInt()
+	//fmt.Printf("Stat(), esp %v, count %s, %s\n", esp, ht.count.String(), count.String())
 	ht.esp = big.NewInt(int64(esp.Nanoseconds()))
 	ht.qps = ht.qps.Mul(count, ht.bigSecond)
 	ht.qps = ht.qps.Div(ht.qps, ht.esp)
@@ -328,44 +335,23 @@ func (ht *hashTester) Close() {
 	default:
 		close(ht.closing)
 	}
-	ht.Result()
+	misc.Tpf(fmt.Sprintln("closing"))
+	//ht.Result()
 	ht.hashs = nil
 	ht.results = nil
 	ht.pool = nil
 	//ht.collided = nil
 	//ht.distr = nil
+	misc.Tpf(fmt.Sprintln("GC"))
 	runtime.GC()
+	misc.Tpf(fmt.Sprintln("FreeMemory"))
 	debug.FreeOSMemory()
 	close(ht.closed)
+	misc.Tpf(fmt.Sprintln("closed"))
 }
 
 // Result return distr/collided map
 func (ht *hashTester) Result() ([]uint16, []uint16) {
-	select {
-	case <-ht.closed:
-		// already closed
-		return ht.distr, ht.collided
-	default:
-	}
-	//reset
-	for idx, _ := range ht.distr {
-		ht.distr[idx] = 0
-	}
-	for idx, _ := range ht.collided {
-		ht.collided[idx] = 0
-	}
-	/*
-		results     []uint16        // all hash info
-		distr       []uint16        // index by math.MaxUint32 % groupsize
-		collided    []uint16        // index by math.MaxUint32 % groupsize
-	*/
-	for num, _ := range ht.results {
-		idx := uint32(num) % ht.groupsize
-		ht.distr[idx]++
-		if ht.results[num] > 0 {
-			ht.collided[idx]++
-		}
-	}
 	return ht.distr, ht.collided
 }
 
@@ -378,6 +364,7 @@ func main() {
 	profileport := flag.Int("port", 6060, "profile http port")
 	runlimit := flag.Int("time", 60, "run time(seconds) limit for each hash")
 	size := flag.Int("size", 128, "block size")
+	countsize := flag.Int("counter", 4, "counter size")
 	groupsize := flag.Int("groupsize", 2048, "group size")
 	cpus := flag.Int("cpu", 0, "cpus")
 	lock := flag.Bool("lock", true, "lock os thread")
@@ -423,10 +410,10 @@ func main() {
 	alldistr := make(map[string][]uint16)
 	allcollided := make(map[string][]uint16)
 	for idx, onehash := range allhasher {
-		misc.Tpf("timelimit %d seconds, size %d, groupsize %d, cpus %d, lock os thread %v, start %s test\n", *runlimit, *size, *groupsize, runtime.GOMAXPROCS(-1), *lock, idx)
+		misc.Tpf("timelimit %d seconds, counter size %d, size %d, groupsize %d, cpus %d, lock os thread %v, start %s test\n", *runlimit, *countsize, *size, *groupsize, runtime.GOMAXPROCS(-1), *lock, idx)
 		alldistr[idx] = make([]uint16, *groupsize)
 		allcollided[idx] = make([]uint16, *groupsize)
-		ht := NewhashTester(*size, misc.NewAnyBaseCounter(8), onehash, uint32(*groupsize), int64(*runlimit), *lock)
+		ht := NewhashTester(*size, misc.NewAnyBaseCounter(*countsize), onehash, uint32(*groupsize), int64(*runlimit), *lock)
 		waitCh := ht.Wait()
 		if *stat {
 			go func() {
@@ -468,5 +455,5 @@ func main() {
 	//		}
 	//	}
 	//}
-	misc.Tpf("all %d done", len(allhasher))
+	misc.Tpf("all %d done\n", len(allhasher))
 }

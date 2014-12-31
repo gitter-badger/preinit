@@ -47,6 +47,7 @@ type hashTester struct {
 	closed      chan struct{}           //
 	closing     chan struct{}           //
 	maxproc     int                     //
+	maxgen      int                     //
 	lock        bool                    //
 	closedflag  bool                    //
 }
@@ -62,11 +63,13 @@ func NewhashTester(size int, gen bigcounter.BigCounter, hash cmtp.Checksum, grou
 	if limit <= 0 {
 		limit = math.MaxUint32
 	}
-	maxproc := runtime.GOMAXPROCS(-1) - 1
 	// -1, reserve one cpu for commond task and counter
-	if maxproc < 1 {
-		maxproc = 1
+	mcpu := runtime.GOMAXPROCS(-1) - 1
+	if mcpu < 1 {
+		mcpu = 1
 	}
+	maxgen := int(float32(mcpu)*4/13) + 1
+	maxproc := int(float32(mcpu)*9/13) + 1
 
 	maxcnt, _ := big.NewInt(0).SetString(gen.Max(), 10)
 	//fmt.Printf("gen.Size() %d, gen.Max() = %s || %x => %s || %x\n", gen.Size(), gen.Max(), gen.Bytes(), maxcnt.String(), maxcnt.Bytes())
@@ -74,7 +77,7 @@ func NewhashTester(size int, gen bigcounter.BigCounter, hash cmtp.Checksum, grou
 	//initpoolsize := uint64(size) * 20000
 	initpoolsize := uint64(size) * 128
 	pool := make([]byteHash, initpoolsize)
-	chunksize := initpoolsize / uint64(maxproc*2)
+	chunksize := initpoolsize / uint64(maxproc*8)
 	if chunksize < uint64(size) {
 		chunksize = uint64(size)
 	}
@@ -112,7 +115,7 @@ func NewhashTester(size int, gen bigcounter.BigCounter, hash cmtp.Checksum, grou
 		idleblocks:  idleblocks,
 		procblocks:  make(chan []uint64, size*100),
 		countblocks: make(chan []uint64, initpoolsize),
-		generators:  make([]bigcounter.BigCounter, maxproc),
+		generators:  make([]bigcounter.BigCounter, maxgen),
 		hashs:       make([]cmtp.Checksum, maxproc),
 		count:       gen.New(),
 		maxcnt:      maxcnt,
@@ -127,14 +130,17 @@ func NewhashTester(size int, gen bigcounter.BigCounter, hash cmtp.Checksum, grou
 		closing:     make(chan struct{}, 128),
 		limit:       time.NewTicker(time.Duration(limit) * time.Second),
 		maxproc:     maxproc,
+		maxgen:      maxgen,
 		lock:        lock,
 	}
 	//
-	genstep := big.NewInt(0)
-	genstep = genstep.Div(ht.maxcnt, big.NewInt(int64(ht.maxproc)))
-	genptr := big.NewInt(0)
 	for i := 0; i < ht.maxproc; i++ {
 		ht.hashs[i] = hash.New(0)
+	}
+	genstep := big.NewInt(0)
+	genstep = genstep.Div(ht.maxcnt, big.NewInt(int64(ht.maxgen)))
+	genptr := big.NewInt(0)
+	for i := 0; i < ht.maxgen; i++ {
 		ht.generators[i] = gen.New()
 		//ht.generators[i].FromBigInt(genptr)
 		ht.generators[i].SetInit(genptr.Bytes())
@@ -146,7 +152,7 @@ func NewhashTester(size int, gen bigcounter.BigCounter, hash cmtp.Checksum, grou
 		genptr = genptr.Add(genptr, genstep)
 	}
 	// update last generator
-	i := ht.maxproc - 1
+	i := ht.maxgen - 1
 	ht.generators[i].SetMax(ht.maxcnt.Bytes())
 	//println("generator#", i, "start from", ht.generators[i].String(), "end at", ht.generators[i].Max())
 	// initial stat
@@ -187,8 +193,9 @@ func (ht *hashTester) genprocbuf() {
 	var wg sync.WaitGroup
 	//cnt := int(float32(ht.maxproc)*2/5) + 1
 	// one generator is fast enough, share cpu with counter
-	cnt := ht.maxproc
-	//println("lauch", cnt, "dogen")
+	// maxgen <= maxproc
+	cnt := ht.maxgen
+	println("lauch", cnt, "genprocbuf")
 	for i := 0; i < cnt; i++ {
 		wg.Add(1)
 		go ht.dogenproc(i, &wg)
@@ -246,10 +253,10 @@ func (ht *hashTester) genbuf() {
 		ht.limit.Stop()
 	}()
 	var wg sync.WaitGroup
-	//cnt := int(float32(ht.maxproc)*2/5) + 1
 	// one generator is fast enough, share cpu with counter
-	cnt := 1
-	//println("lauch", cnt, "dogen")
+	// cnt := 1
+	cnt := ht.maxgen
+	println("lauch", cnt, "dogen")
 	for i := 0; i < cnt; i++ {
 		wg.Add(1)
 		go ht.dogen(i, &wg)
@@ -300,11 +307,11 @@ func (ht *hashTester) procbuf() {
 	var wg sync.WaitGroup
 	// cnt := int(float32(ht.maxproc)*2/5) + 1
 	// hash is slow, using more cpus
-	cnt := ht.maxproc - 1
+	cnt := ht.maxproc
 	if cnt < 1 {
 		cnt = 1
 	}
-	//println("lauch", cnt, "hasher")
+	println("lauch", cnt, "dohash")
 	for i := 0; i < cnt; i++ {
 		wg.Add(1)
 		go ht.dohash(i, &wg)
@@ -485,7 +492,7 @@ func main() {
 	allhasher := map[string]cmtp.Checksum{
 		"Murmur3": cmtp.NewMurmur3(0),
 		//"noop":    cmtp.NewNoopChecksum(0),
-		//"xxhash": cmtp.NewXxhash(0),
+		"xxhash": cmtp.NewXxhash(0),
 	}
 	//
 	misc.Tpf("testing")

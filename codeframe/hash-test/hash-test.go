@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wheelcomplex/preinit/bigcounter"
 	"github.com/wheelcomplex/preinit/cmtp"
 	"github.com/wheelcomplex/preinit/misc"
 )
@@ -23,35 +24,35 @@ type byteHash struct {
 }
 
 type hashTester struct {
-	size        uint32            //
-	groupsize   uint32            //
-	generators  []misc.BigCounter //
-	pool        []byteHash        //
-	poollast    uint64            //
-	idleblocks  chan []uint64     //
-	procblocks  chan []uint64     //
-	countblocks chan []uint64     //
-	hashs       []cmtp.Checksum   //
-	count       misc.BigCounter   //
-	maxcnt      *big.Int          //
-	bigSecond   *big.Int          //
-	results     []uint16          // all hash info
-	distr       []uint16          // index by math.MaxUint32 % groupsize
-	collided    []uint16          // index by math.MaxUint32 % groupsize
-	startts     time.Time         //
-	endts       time.Time         //
-	esp         *big.Int          //
-	qps         *big.Int          //
-	limit       *time.Ticker      //
-	closed      chan struct{}     //
-	closing     chan struct{}     //
-	maxproc     int               //
-	lock        bool              //
-	closedflag  bool              //
+	size        uint32                  //
+	groupsize   uint32                  //
+	generators  []bigcounter.BigCounter //
+	pool        []byteHash              //
+	poollast    uint64                  //
+	idleblocks  chan []uint64           //
+	procblocks  chan []uint64           //
+	countblocks chan []uint64           //
+	hashs       []cmtp.Checksum         //
+	count       bigcounter.BigCounter   //
+	maxcnt      *big.Int                //
+	bigSecond   *big.Int                //
+	results     []uint16                // all hash info
+	distr       []uint16                // index by math.MaxUint32 % groupsize
+	collided    []uint16                // index by math.MaxUint32 % groupsize
+	startts     time.Time               //
+	endts       time.Time               //
+	esp         *big.Int                //
+	qps         *big.Int                //
+	limit       *time.Ticker            //
+	closed      chan struct{}           //
+	closing     chan struct{}           //
+	maxproc     int                     //
+	lock        bool                    //
+	closedflag  bool                    //
 }
 
 //
-func NewhashTester(size int, gen misc.BigCounter, hash cmtp.Checksum, groupsize uint32, limit int64, lock bool) *hashTester {
+func NewhashTester(size int, gen bigcounter.BigCounter, hash cmtp.Checksum, groupsize uint32, limit int64, lock bool) *hashTester {
 	if size < 1 {
 		size = 1
 	}
@@ -111,7 +112,7 @@ func NewhashTester(size int, gen misc.BigCounter, hash cmtp.Checksum, groupsize 
 		idleblocks:  idleblocks,
 		procblocks:  make(chan []uint64, size*100),
 		countblocks: make(chan []uint64, initpoolsize),
-		generators:  make([]misc.BigCounter, maxproc),
+		generators:  make([]bigcounter.BigCounter, maxproc),
 		hashs:       make([]cmtp.Checksum, maxproc),
 		count:       gen.New(),
 		maxcnt:      maxcnt,
@@ -152,9 +153,9 @@ func NewhashTester(size int, gen misc.BigCounter, hash cmtp.Checksum, groupsize 
 	ht.Stat()
 	go ht.closer()
 	go ht.counter()
-	go ht.genprocbuf()
-	//go ht.genbuf()
-	//go ht.procbuf()
+	//go ht.genprocbuf()
+	go ht.genbuf()
+	go ht.procbuf()
 	return ht
 }
 
@@ -498,7 +499,7 @@ func main() {
 		misc.Tpf("timelimit %d seconds, counter size %d, size %d, groupsize %d, cpus %d, lock os thread %v, start %s test\n", *runlimit, *countsize, *size, *groupsize, runtime.GOMAXPROCS(-1), *lock, idx)
 		alldistr[idx] = make([]uint16, *groupsize)
 		allcollided[idx] = make([]uint16, *groupsize)
-		ht := NewhashTester(*size, misc.NewAnyBaseCounter(*countsize), onehash, uint32(*groupsize), int64(*runlimit), *lock)
+		ht := NewhashTester(*size, bigcounter.NewAnyBaseCounter(*countsize), onehash, uint32(*groupsize), int64(*runlimit), *lock)
 		waitCh := ht.Wait()
 		if *stat {
 			go func() {

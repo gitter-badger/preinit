@@ -228,13 +228,13 @@ func (ht *hashTester) dogenproc(i int, wg *sync.WaitGroup) {
 			}
 		}
 
-		// ht.countblocks <- buf
-		select {
-		case ht.countblocks <- buf:
-		default:
-			println("ht.countblocks <- buf blocking")
-			ht.countblocks <- buf
-		}
+		ht.countblocks <- buf
+		//select {
+		//case ht.countblocks <- buf:
+		//default:
+		//	println("ht.countblocks <- buf blocking")
+		//	ht.countblocks <- buf
+		//}
 	}
 }
 
@@ -374,13 +374,13 @@ func (ht *hashTester) counter() {
 		}
 		ht.count.AddUint64(bcount)
 
-		//ht.idleblocks <- buf
-		select {
-		case ht.idleblocks <- buf:
-		default:
-			println("ht.idleblocks <- buf blocking")
-			ht.idleblocks <- buf
-		}
+		ht.idleblocks <- buf
+		//select {
+		//case ht.idleblocks <- buf:
+		//default:
+		//	println("ht.idleblocks <- buf blocking")
+		//	ht.idleblocks <- buf
+		//}
 
 	}
 }

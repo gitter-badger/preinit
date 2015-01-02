@@ -209,15 +209,6 @@ func NewhashTester(size int,
 	globeHashSize = size
 
 	// larger globeChunkSize use more memory and save more cpu
-
-	//globeChunkSize = 512 + 128
-	//countersize := maxworker * 2048 * 2048
-	// 3151
-
-	//globeChunkSize = 1024
-	//countersize := maxworker * 2048 * 2048
-	// 3153, stable
-
 	globeChunkSize = 512
 	countersize := maxworker * 2048 * 2048
 	// 3168 last better

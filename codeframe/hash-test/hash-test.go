@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"net"
 	"net/http"
 	_ "net/http/pprof"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"sync"
@@ -111,15 +113,15 @@ func (hw *hashWorker) Destroy() {
 
 // Run blocking run hash test
 func (hw *hashWorker) Run() {
+	var bchunk [][]byte
+	var hchunk []uint32
+	// TODO: compare select closing check and bool closing check
+
 	defer func() {
 		close(hw.closed)
 		hw.Destroy()
 		//println("hashWorker", hw.index, "exited")
 	}()
-
-	var bchunk [][]byte
-	var hchunk []uint32
-	// TODO: compare select closing check and bool closing check
 
 	for hw.finished == false {
 
@@ -128,6 +130,7 @@ func (hw *hashWorker) Run() {
 
 		for idx, _ := range bchunk {
 			// generate hash buffer
+			// FillBytes FillExpBytes
 			hw.generator.FillExpBytes(bchunk[idx])
 
 			// hash and save result
@@ -135,20 +138,21 @@ func (hw *hashWorker) Run() {
 
 			// generator ++
 			if err := hw.generator.Plus(); err != nil {
-				hchunk = hchunk[:idx+1]
-				break
+
+				// worker exit
+				for i := idx + 1; i < len(bchunk); i++ {
+					hchunk[idx] = 0
+				}
+
+				hw.bytePool.Put(bchunk)
+				hw.counterCh <- hchunk
+
+				return
 			}
 		}
+
 		hw.bytePool.Put(bchunk)
-
 		hw.counterCh <- hchunk
-
-		//select {
-		//case hw.counterCh <- hchunk:
-		//default:
-		//	println("hw.counterCh <- hchunk blocking")
-		//	hw.counterCh <- hchunk
-		//}
 	}
 }
 
@@ -171,8 +175,8 @@ type hashTester struct {
 	maxcnt     *big.Int              //
 	bigSecond  *big.Int              //
 	results    []uint16              // all hash info
-	distr      []uint16              // index by math.MaxUint32 % groupsize
-	collided   []uint16              // index by math.MaxUint32 % groupsize
+	distr      []uint64              // index by math.MaxUint32 % groupsize
+	collided   []uint64              // index by math.MaxUint32 % groupsize
 	startts    time.Time             //
 	endts      time.Time             //
 	esp        *big.Int              //
@@ -195,6 +199,11 @@ func NewhashTester(size int,
 	limit int64,
 	lockThread bool) *hashTester {
 
+	// do not lock os thread when only one cpu used
+	if runtime.GOMAXPROCS(-1) == 1 {
+		lockThread = false
+	}
+
 	// -1, reserve one cpu for commond task and counter
 	maxworker := runtime.GOMAXPROCS(-1) - 1
 	if maxworker < 1 {
@@ -209,9 +218,9 @@ func NewhashTester(size int,
 	globeHashSize = size
 
 	// larger globeChunkSize use more memory and save more cpu
-	globeChunkSize = 512
-	countersize := maxworker * 2048 * 2048
-	// 3168 last better
+	globeChunkSize = 2048
+	countersize := maxworker * 2048 * 2048 * 4
+	// 3228
 
 	if groupsize <= 0 {
 		groupsize = 4096
@@ -238,8 +247,8 @@ func NewhashTester(size int,
 		maxcnt:     maxcnt,
 		bigSecond:  big.NewInt(int64(time.Second)),
 		results:    make([]uint16, math.MaxUint32+1),
-		distr:      make([]uint16, groupsize),
-		collided:   make([]uint16, groupsize),
+		distr:      make([]uint64, groupsize),
+		collided:   make([]uint64, groupsize),
 		startts:    time.Now(),
 		endts:      time.Now(),
 		qps:        big.NewInt(0),
@@ -264,7 +273,7 @@ func (ht *hashTester) run() {
 	defer func() {
 		// all done, close
 		close(ht.counterCh)
-		//misc.Tpf(fmt.Sprintln(ht.maxworker, "worker exited"))
+		misc.Tpf(fmt.Sprintln(ht.maxworker, "worker exited"))
 	}()
 	var wg sync.WaitGroup
 	//misc.Tpf(fmt.Sprintln("lauch", ht.maxworker, "worker"))
@@ -296,15 +305,16 @@ func (ht *hashTester) run() {
 		go ht.runWorker(ht.workers[i], &wg)
 		//time.Sleep(2)
 	}
+	misc.Tpf(fmt.Sprintln(ht.maxworker, "worker running ..."))
 	ht.startts = time.Now()
 	ht.Stat()
 	wg.Wait()
+	ht.Stat()
 	select {
 	case <-ht.closing:
 	default:
 		close(ht.closing)
 	}
-	ht.Stat()
 }
 
 //
@@ -332,24 +342,31 @@ func (ht *hashTester) counter() {
 		defer runtime.UnlockOSThread()
 	}
 	for hchunk := range ht.counterCh {
-		for idx, _ := range hchunk {
-			ht.results[hchunk[idx]]++
+
+		for _, val := range hchunk {
+			ht.results[val]++
 		}
+
 		ht.rm.Lock()
 		ht.count.AddUint64(uint64(len(hchunk)))
 		ht.rm.Unlock()
+
 		ht.hashPool.Put(hchunk)
+
 	}
 	// worker exited
 	ht.Stat()
 	misc.Tpf(fmt.Sprintln("result computing"))
-	for idx, _ := range ht.results {
+	for idx, val := range ht.results {
 		ridx := idx % ht.groupsize
+		//if val != 0 {
+		//	println("idx", idx, "count", val, "ridx", ridx)
+		//}
 		//results     []uint16        // all hash info
-		//distr       []uint16        // index by math.MaxUint32 % groupsize
-		//collided    []uint16        // index by math.MaxUint32 % groupsize
+		//distr       []uint64        // index by math.MaxUint32 % groupsize
+		//collided    []uint64        // index by math.MaxUint32 % groupsize
 		ht.distr[ridx]++
-		if ht.results[ht.results[idx]] > 0 {
+		if val > 0 {
 			ht.collided[ridx]++
 		}
 	}
@@ -431,7 +448,7 @@ func (ht *hashTester) Close() {
 
 // Result return distr/collided map
 // caller will blocked until finished
-func (ht *hashTester) Result() ([]uint16, []uint16) {
+func (ht *hashTester) Result() ([]uint64, []uint64) {
 	<-ht.closed
 	return ht.distr, ht.collided
 }
@@ -441,7 +458,507 @@ func (ht *hashTester) Wait() <-chan struct{} {
 	return ht.closed
 }
 
+//
+//
+// github.com/wheelcomplex/svgo
+//
+
+//
+// http://faso.me/notes/20140411/svg-tutorial/
+//
+//
+// http://apike.ca/prog_svg_jsanim.html javascript in svg
+//
+// type="text/ecmascript" for local svg file
+// type="text/javascript" for web browser
+//
+type SvgHandler struct {
+	size     int
+	distr    map[string][]uint64
+	collided map[string][]uint64
+	svgbuf   []byte
+	buf      []byte
+	header   []byte
+	tail     []byte
+	m        sync.Mutex
+	wait     chan struct{}
+}
+
+//
+func newSvgHandler(size int) *SvgHandler {
+	if size <= 0 {
+		size = 1
+	}
+
+	// <?xml version="1.0" standalone="no"?>
+	// <svg width="%100" height="%100" version="1.1" xmlns="http://www.w3.org/2000/svg">
+	/*
+		<br />
+		<h6>hash test result</h6>
+		<br />
+		<svg width="1340" height="640" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+	*/
+	var header []byte = []byte(`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+
+<svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+
+<!-- from https://www.cyberz.org/projects/SVGPan/SVGPan.js -->
+<script type="text/ecmascript"><![CDATA[
+/** 
+ *  SVGPan library 1.2.1
+ * ======================
+ *
+ * Given an unique existing element with id "viewport" (or when missing, the first g 
+ * element), including the the library into any SVG adds the following capabilities:
+ *
+ *  - Mouse panning
+ *  - Mouse zooming (using the wheel)
+ *  - Object dragging
+ *
+ * You can configure the behaviour of the pan/zoom/drag with the variables
+ * listed in the CONFIGURATION section of this file.
+ *
+ * Known issues:
+ *
+ *  - Zooming (while panning) on Safari has still some issues
+ *
+ * Releases:
+ *
+ * 1.2.1, Mon Jul  4 00:33:18 CEST 2011, Andrea Leofreddi
+ *	- Fixed a regression with mouse wheel (now working on Firefox 5)
+ *	- Working with viewBox attribute (#4)
+ *	- Added "use strict;" and fixed resulting warnings (#5)
+ *	- Added configuration variables, dragging is disabled by default (#3)
+ *
+ * 1.2, Sat Mar 20 08:42:50 GMT 2010, Zeng Xiaohui
+ *	Fixed a bug with browser mouse handler interaction
+ *
+ * 1.1, Wed Feb  3 17:39:33 GMT 2010, Zeng Xiaohui
+ *	Updated the zoom code to support the mouse wheel on Safari/Chrome
+ *
+ * 1.0, Andrea Leofreddi
+ *	First release
+ *
+ * This code is licensed under the following BSD license:
+ *
+ * Copyright 2009-2010 Andrea Leofreddi <a.leofreddi@itcharm.com>. All rights reserved.
+ * 
+ * Redistribution and use in source and binary forms, with or without modification, are
+ * permitted provided that the following conditions are met:
+ * 
+ *    1. Redistributions of source code must retain the above copyright notice, this list of
+ *       conditions and the following disclaimer.
+ * 
+ *    2. Redistributions in binary form must reproduce the above copyright notice, this list
+ *       of conditions and the following disclaimer in the documentation and/or other materials
+ *       provided with the distribution.
+ * 
+ * THIS SOFTWARE IS PROVIDED BY Andrea Leofreddi ''AS IS'' AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL Andrea Leofreddi OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ * ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * 
+ * The views and conclusions contained in the software and documentation are those of the
+ * authors and should not be interpreted as representing official policies, either expressed
+ * or implied, of Andrea Leofreddi.
+ */
+
+"use strict";
+
+/// CONFIGURATION 
+/// ====>
+
+var enablePan = 1; // 1 or 0: enable or disable panning (default enabled)
+var enableZoom = 1; // 1 or 0: enable or disable zooming (default enabled)
+var enableDrag = 0; // 1 or 0: enable or disable dragging (default disabled)
+
+/// <====
+/// END OF CONFIGURATION 
+
+var root = document.documentElement;
+
+var state = 'none', svgRoot, stateTarget, stateOrigin, stateTf;
+
+setupHandlers(root);
+
+/**
+ * Register handlers
+ */
+function setupHandlers(root){
+	setAttributes(root, {
+		"onmouseup" : "handleMouseUp(evt)",
+		"onmousedown" : "handleMouseDown(evt)",
+		"onmousemove" : "handleMouseMove(evt)",
+		//"onmouseout" : "handleMouseUp(evt)", // Decomment this to stop the pan functionality when dragging out of the SVG element
+	});
+
+	if(navigator.userAgent.toLowerCase().indexOf('webkit') >= 0)
+		window.addEventListener('mousewheel', handleMouseWheel, false); // Chrome/Safari
+	else
+		window.addEventListener('DOMMouseScroll', handleMouseWheel, false); // Others
+}
+
+/**
+ * Retrieves the root element for SVG manipulation. The element is then cached into the svgRoot global variable.
+ */
+function getRoot(root) {
+	if(typeof(svgRoot) == "undefined") {
+		var g = null;
+
+		g = root.getElementById("viewport");
+
+		if(g == null)
+			g = root.getElementsByTagName('g')[0];
+
+		if(g == null)
+			alert('Unable to obtain SVG root element');
+
+		setCTM(g, g.getCTM());
+
+		g.removeAttribute("viewBox");
+
+		svgRoot = g;
+	}
+
+	return svgRoot;
+}
+
+/**
+ * Instance an SVGPoint object with given event coordinates.
+ */
+function getEventPoint(evt) {
+	var p = root.createSVGPoint();
+
+	p.x = evt.clientX;
+	p.y = evt.clientY;
+
+	return p;
+}
+
+/**
+ * Sets the current transform matrix of an element.
+ */
+function setCTM(element, matrix) {
+	var s = "matrix(" + matrix.a + "," + matrix.b + "," + matrix.c + "," + matrix.d + "," + matrix.e + "," + matrix.f + ")";
+
+	element.setAttribute("transform", s);
+}
+
+/**
+ * Dumps a matrix to a string (useful for debug).
+ */
+function dumpMatrix(matrix) {
+	var s = "[ " + matrix.a + ", " + matrix.c + ", " + matrix.e + "\n  " + matrix.b + ", " + matrix.d + ", " + matrix.f + "\n  0, 0, 1 ]";
+
+	return s;
+}
+
+/**
+ * Sets attributes of an element.
+ */
+function setAttributes(element, attributes){
+	for (var i in attributes)
+		element.setAttributeNS(null, i, attributes[i]);
+}
+
+/**
+ * Handle mouse wheel event.
+ */
+function handleMouseWheel(evt) {
+	if(!enableZoom)
+		return;
+
+	if(evt.preventDefault)
+		evt.preventDefault();
+
+	evt.returnValue = false;
+
+	var svgDoc = evt.target.ownerDocument;
+
+	var delta;
+
+	if(evt.wheelDelta)
+		delta = evt.wheelDelta / 3600; // Chrome/Safari
+	else
+		delta = evt.detail / -90; // Mozilla
+
+	var z = 1 + delta; // Zoom factor: 0.9/1.1
+
+	var g = getRoot(svgDoc);
+	
+	var p = getEventPoint(evt);
+
+	p = p.matrixTransform(g.getCTM().inverse());
+
+	// Compute new scale matrix in current mouse position
+	var k = root.createSVGMatrix().translate(p.x, p.y).scale(z).translate(-p.x, -p.y);
+
+        setCTM(g, g.getCTM().multiply(k));
+
+	if(typeof(stateTf) == "undefined")
+		stateTf = g.getCTM().inverse();
+
+	stateTf = stateTf.multiply(k.inverse());
+}
+
+/**
+ * Handle mouse move event.
+ */
+function handleMouseMove(evt) {
+	if(evt.preventDefault)
+		evt.preventDefault();
+
+	evt.returnValue = false;
+
+	var svgDoc = evt.target.ownerDocument;
+
+	var g = getRoot(svgDoc);
+
+	if(state == 'pan' && enablePan) {
+		// Pan mode
+		var p = getEventPoint(evt).matrixTransform(stateTf);
+
+		setCTM(g, stateTf.inverse().translate(p.x - stateOrigin.x, p.y - stateOrigin.y));
+	} else if(state == 'drag' && enableDrag) {
+		// Drag mode
+		var p = getEventPoint(evt).matrixTransform(g.getCTM().inverse());
+
+		setCTM(stateTarget, root.createSVGMatrix().translate(p.x - stateOrigin.x, p.y - stateOrigin.y).multiply(g.getCTM().inverse()).multiply(stateTarget.getCTM()));
+
+		stateOrigin = p;
+	}
+}
+
+/**
+ * Handle click event.
+ */
+function handleMouseDown(evt) {
+	if(evt.preventDefault)
+		evt.preventDefault();
+
+	evt.returnValue = false;
+
+	var svgDoc = evt.target.ownerDocument;
+
+	var g = getRoot(svgDoc);
+
+	if(
+		evt.target.tagName == "svg" 
+		|| !enableDrag // Pan anyway when drag is disabled and the user clicked on an element 
+	) {
+		// Pan mode
+		state = 'pan';
+
+		stateTf = g.getCTM().inverse();
+
+		stateOrigin = getEventPoint(evt).matrixTransform(stateTf);
+	} else {
+		// Drag mode
+		state = 'drag';
+
+		stateTarget = evt.target;
+
+		stateTf = g.getCTM().inverse();
+
+		stateOrigin = getEventPoint(evt).matrixTransform(stateTf);
+	}
+}
+
+/**
+ * Handle mouse button release event.
+ */
+function handleMouseUp(evt) {
+	if(evt.preventDefault)
+		evt.preventDefault();
+
+	evt.returnValue = false;
+
+	var svgDoc = evt.target.ownerDocument;
+
+	if(state == 'pan' || state == 'drag') {
+		// Quit pan mode
+		state = '';
+	}
+}
+]]></script>
+
+<g id="viewport" transform="scale(1, 1) translate(0, 0)">
+
+<line x1="40" y1="500" x2="1300" y2="500" style="stroke:#2E9AFE; stroke-width:1" />
+
+<text x="28" y="506" fill="#FF3D82" font-size="16">X</text>
+
+<line x1="80" y1="20" x2="80" y2="640" style="stroke:#2E9AFE; stroke-width:1" />
+
+<text x="74" y="18" fill="#FF3D82" font-size="16">Y</text>
+
+<text x="64" y="520" fill="#FF3D82" font-size="24">0</text>`)
+
+	var tail []byte = []byte(`
+</g>
+</svg>`)
+
+	return &SvgHandler{
+		size:     size,
+		header:   header,
+		tail:     tail,
+		distr:    make(map[string][]uint64),
+		collided: make(map[string][]uint64),
+		svgbuf:   make([]byte, 2048),
+		buf:      make([]byte, 2048),
+		wait:     make(chan struct{}),
+	}
+}
+
+//
+func (sh *SvgHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	sh.m.Lock()
+	defer sh.m.Unlock()
+	//w.Header().Set("Content-Type", "text/html;charset=UTF-8")
+	//w.Header().Set("Content-Type", "image/svg;charset=UTF-8")
+	//w.Header().Set("Content-Type", "image/svg+xml;charset=UTF-8")
+	w.Header().Set("Content-Type", "image/svg+xml")
+	//w.Header().Set("Content-Type", "text/plain")
+	//w.Header().Set("Content-Type", "text/html")
+	// Refresh: 0;url=my_view_page.php
+	//w.Header().Set("Refresh", "5;"+req.URL.RequestURI())
+	//
+	// create desc
+	//
+	sh.svgbuf = sh.svgbuf[:0]
+	desc := ""
+	if len(sh.distr) > 0 {
+		for idx, _ := range sh.distr {
+			desc += " " + idx
+		}
+	} else {
+		desc = " testing, please wait ..."
+	}
+
+	// desc
+	sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%s%s%s", `<text x="180" y="560" fill="#DF3D82" font-size="24">`, desc, `</text>`))...)
+
+	// time stamp
+	sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%s%s%s", `<text x="180" y="600" fill="#DF3D82" font-size="24">`, time.Now().String(), `</text>`))...)
+
+	//
+	// create svg
+	//
+
+	/*
+	   M：move to ，移动至
+	   L：line to ，直线至
+	   V：vertical line to ，垂直方向直线至
+	   H：horizontal line to ，水平方向直线至
+	   C：curve to ，曲线至
+	   S：smooth curve to ，平滑曲线至
+	   Q：quadratic Bézier curve，二维贝塞尔曲线
+	   T：smooth quadratic Bézier curve，平滑二维贝塞尔曲线
+	   A：elliptical arc，椭圆弧
+
+	   大写字母表示定位方式使用绝对位置，小写则使用相对定位
+	*/
+	xstart := 80
+	ystart := 500
+	//xend := 1300
+	//yend := 20
+	// ylen = 480
+	// xlen = 1220
+
+	// start of path
+	sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("\n<path d=\"M%d %d S", xstart, ystart))...)
+
+	if len(sh.distr) > 0 {
+		// draw path
+		sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%s", "140 30 180 90 20 160"))...)
+	} else {
+		// nothing to draw
+		sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%d %d  %d %d", xstart+1, ystart-1, xstart+1, ystart-1))...)
+	}
+
+	// end of path
+	sh.svgbuf = append(sh.svgbuf, []byte(`" style="fill: none; stroke: #DF3D82; stroke-width: 2;" />`)...)
+
+	outputlen := len(sh.svgbuf)
+	//
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", outputlen+len(sh.header)+len(sh.tail)))
+	//
+	w.Write(sh.header)
+	//
+	w.Write(sh.svgbuf[:outputlen])
+	//
+	w.Write(sh.tail)
+}
+
+func (sh *SvgHandler) Close() {
+	select {
+	case <-sh.wait:
+	default:
+		close(sh.wait)
+	}
+}
+
+//
+func (sh *SvgHandler) Wait() <-chan struct{} {
+	return sh.wait
+}
+
+//
+func (sh *SvgHandler) String() string {
+	sh.m.Lock()
+	defer sh.m.Unlock()
+	sh.buf = sh.buf[:0]
+	for name, _ := range sh.distr {
+		sh.buf = append(sh.buf, []byte(fmt.Sprintf("--- distr %s ---\n", name))...)
+		for idx, _ := range sh.distr[name] {
+			sh.buf = append(sh.buf, []byte(fmt.Sprintf("%d, %d\n", idx, sh.distr[name][idx]))...)
+		}
+		sh.buf = append(sh.buf, []byte(fmt.Sprintf("--- collided %s ---\n", name))...)
+		for idx, _ := range sh.collided[name] {
+			if sh.collided[name][idx] > 0 {
+				sh.buf = append(sh.buf, []byte(fmt.Sprintf("%d, %d\n", idx, sh.collided[name][idx]))...)
+			}
+		}
+	}
+	return string(sh.buf)
+}
+
+//
+func (sh *SvgHandler) Fill(name string, filldistr, fillcollided []uint64) {
+	sh.m.Lock()
+	defer sh.m.Unlock()
+	if _, ok := sh.distr[name]; ok == false {
+		sh.distr[name] = make([]uint64, sh.size)
+	}
+	for i := 0; i < sh.size && i < len(filldistr); i++ {
+		sh.distr[name][i] = filldistr[i]
+	}
+	// len(filldistr) < sh.size
+	for i := len(filldistr); i < sh.size; i++ {
+		sh.distr[name][i] = 0
+	}
+	//
+	if _, ok := sh.collided[name]; ok == false {
+		sh.collided[name] = make([]uint64, sh.size)
+	}
+	for i := 0; i < sh.size && i < len(fillcollided); i++ {
+		sh.collided[name][i] = fillcollided[i]
+	}
+	// len(fillcollided) < sh.size
+	for i := len(fillcollided); i < sh.size; i++ {
+		sh.collided[name][i] = 0
+	}
+}
+
 func main() {
+	svgport := flag.String("svgport", ":9980", "svg http port")
 	profileport := flag.Int("port", 6060, "profile http port")
 	runlimit := flag.Int("time", 60, "run time(seconds) limit for each hash")
 	size := flag.Int("size", 256, "block size")
@@ -452,6 +969,7 @@ func main() {
 	stat := flag.Bool("stat", true, "show interval stat")
 	flag.Parse()
 	fmt.Printf(" go tool pprof http://localhost:%d/debug/pprof/profile\n", *profileport)
+	fmt.Printf(" svg output http://localhost%s/\n", *svgport)
 	go func() {
 		fmt.Println(http.ListenAndServe(fmt.Sprintf("localhost:%d", *profileport), nil))
 	}()
@@ -476,11 +994,18 @@ func main() {
 		*runlimit = 10
 	}
 
+	svgl, svgerr := net.Listen("tcp", *svgport)
+	if svgerr != nil {
+		misc.Tpf("listen at %s failed: %s\n", svgerr.Error())
+		os.Exit(1)
+	}
+
 	//
 	allhasher := map[string]cmtp.Checksum{
 		//"Murmur3": cmtp.NewMurmur3(0),
+		"xxhash": cmtp.NewXxhash(0),
 		//"noop":    cmtp.NewNoopChecksum(0),
-		"xxhash1": cmtp.NewXxhash(0),
+		//"xxhash1": cmtp.NewXxhash(0),
 		//"xxhash2": cmtp.NewXxhash(0),
 		//"xxhash3": cmtp.NewXxhash(0),
 	}
@@ -490,12 +1015,26 @@ func main() {
 		fmt.Printf(" %s", idx)
 	}
 	fmt.Printf(" ...\n")
-	alldistr := make(map[string][]uint16)
-	allcollided := make(map[string][]uint16)
+
+	//
+	// svghandler implated
+	//
+	// ServeHTTP(http.ResponseWriter, *http.Request)
+	//
+
+	svghandler := newSvgHandler(*groupsize)
+
+	go func() {
+		svgerr = http.Serve(svgl, svghandler)
+		if svgerr != nil {
+			misc.Tpf("Serve at %s failed: %s\n", svgerr.Error())
+			os.Exit(1)
+		}
+		//
+	}()
+
 	for idx, onehash := range allhasher {
 		misc.Tpf("timelimit %d seconds, counter size %d, size %d, groupsize %d, cpus %d, stat %v, lock os thread %v, start %s test\n", *runlimit, *countsize, *size, *groupsize, runtime.GOMAXPROCS(-1), *stat, *lock, idx)
-		alldistr[idx] = make([]uint16, *groupsize)
-		allcollided[idx] = make([]uint16, *groupsize)
 		ht := NewhashTester(*size, bigcounter.NewAnyBaseCounter(*countsize), onehash, *groupsize, int64(*runlimit), *lock)
 		waitCh := ht.Wait()
 		if *stat {
@@ -519,28 +1058,15 @@ func main() {
 		}
 		<-waitCh
 		distr, collided := ht.Result()
-		copy(alldistr[idx], distr)
-		copy(allcollided[idx], collided)
+		svghandler.Fill(idx, distr, collided)
 		count, qps, esp := ht.Stat()
 		misc.Tpf("End %s, size %d, count %s, esp %v, qps %s\n", idx, *size, count, esp, qps)
 		misc.Tpf("%s test done\n", idx)
 	}
 
-	//
-	// github.com/wheelcomplex/svgo
-	//
+	fmt.Print(svghandler.String())
 
-	//for name, _ := range alldistr {
-	//	fmt.Printf("--- distr %s ---\n", name)
-	//	for idx, _ := range alldistr[name] {
-	//		fmt.Printf("%d, %d\n", idx, alldistr[name][idx])
-	//	}
-	//	fmt.Printf("--- collided %s ---\n", name)
-	//	for idx, _ := range allcollided[name] {
-	//		if allcollided[name][idx] > 0 {
-	//			fmt.Printf("%d, %d\n", idx, allcollided[name][idx])
-	//		}
-	//	}
-	//}
 	misc.Tpf("all %d done\n", len(allhasher))
+
+	<-svghandler.Wait()
 }

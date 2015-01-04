@@ -23,148 +23,27 @@ import (
 // newByteChunk new [][]byte for sync.Pool.New
 func newByteChunk(chunksize, hashsize int) func() interface{} {
 	return func() interface{} {
-		bc := make([][]byte, chunksize)
+		c := make([][]byte, chunksize)
 		for i := 0; i < chunksize; i++ {
-			bc[i] = make([]byte, hashsize)
+			c[i] = make([]byte, hashsize)
 		}
-		return bc
+		return c
 	}
+}
+
+//
+type hashCarrier struct {
+	ptr int
+	buf []uint32
 }
 
 // newHashChunk new []uint32 for sync.Pool.New
-func newHashChunk(size int) func() interface{} {
+func newHashChunk(chunksize int) func() interface{} {
 	return func() interface{} {
-		return make([]uint32, size)
-	}
-}
-
-// newHashSizeChunk new []uint32 with size limit
-func newHashSizeChunk(size int) []uint32 {
-	return make([]uint32, size)
-}
-
-// one worker for one thread
-type hashWorker struct {
-	index     int                   // index of worker
-	generator bigcounter.BigCounter // standalone in worker
-	checksum  cmtp.Checksum         // standalone in worker
-	hashPool  *sync.Pool            // []uint32 pool, share with all worker
-	counterCh chan []uint32         // result out, []uint32
-	bytePool  *sync.Pool            // [][]byte pool, standalone in worker
-	m         sync.Mutex            // locker for worker
-	closing   chan struct{}         // closing signal
-	closed    chan struct{}         // closed signal
-	finished  bool                  // finish signal for closer
-	destroyed bool                  // destroyed flag
-}
-
-// newHashWorker return new hashWorker
-// index, generator, checksum should be standalone for worker
-// hashPool, counterCh share with all worker
-func newHashWorker(index int,
-	hashsize int,
-	generator bigcounter.BigCounter,
-	checksum cmtp.Checksum,
-	hashPool *sync.Pool,
-	counterCh chan []uint32) *hashWorker {
-
-	tmp := hashPool.Get().([]uint32)
-	chunksize := len(tmp)
-	hashPool.Put(tmp)
-
-	hw := &hashWorker{
-		index:     index,
-		generator: generator,
-		checksum:  checksum,
-		bytePool: &sync.Pool{
-			New: newByteChunk(chunksize, hashsize),
-		},
-		hashPool:  hashPool,
-		counterCh: counterCh,
-		closing:   make(chan struct{}, 128),
-		closed:    make(chan struct{}, 128),
-	}
-
-	go hw.closer()
-	return hw
-}
-
-// Destroy free all internal resource
-// all call to destroyed hashWorker may case panic
-func (hw *hashWorker) Destroy() {
-	//println("Destroy enter", hw.index)
-	hw.m.Lock()
-	defer hw.m.Unlock()
-	if hw.destroyed {
-		// already destroyed
-		return
-	}
-	//println("Destroy try", hw.index)
-	select {
-	case <-hw.closing:
-	default:
-		close(hw.closing)
-	}
-	// waitting for worker close
-	//println("Destroy wait", hw.index)
-	<-hw.closed
-	hw.destroyed = true
-	hw.generator = nil
-	hw.checksum = nil
-	hw.bytePool = nil
-	//println("Destroy done", hw.index)
-}
-
-// Run blocking run hash test
-func (hw *hashWorker) Run() {
-	var bchunk [][]byte
-	var hchunk []uint32
-	// TODO: compare select closing check and bool closing check
-
-	defer func() {
-		close(hw.closed)
-		hw.Destroy()
-		//println("hashWorker", hw.index, "exited")
-	}()
-
-	for hw.finished == false {
-
-		bchunk = hw.bytePool.Get().([][]byte)
-		hchunk = hw.hashPool.Get().([]uint32)
-
-		for idx, _ := range bchunk {
-			// generate hash buffer
-			// FillBytes FillExpBytes
-			hw.generator.FillExpBytes(bchunk[idx])
-
-			// hash and save result
-			hchunk[idx] = hw.checksum.Checksum32(bchunk[idx])
-
-			// generator ++
-			if err := hw.generator.Plus(); err != nil {
-
-				// worker exit, mark unused item
-				for i := idx + 1; i < len(bchunk); i++ {
-					hchunk[idx] = math.MaxUint32
-				}
-
-				// last chunk
-				hw.bytePool.Put(bchunk)
-				hw.counterCh <- hchunk
-
-				return
-			}
+		return &hashCarrier{
+			buf: make([]uint32, chunksize),
 		}
-
-		hw.bytePool.Put(bchunk)
-		hw.counterCh <- hchunk
 	}
-}
-
-// closer run hash test in goroutine
-func (hw *hashWorker) closer() {
-	<-hw.closing
-	hw.finished = true
 }
 
 //
@@ -174,10 +53,10 @@ type hashTester struct {
 	groupsize  int                   //
 	generator  bigcounter.BigCounter // standalone in worker
 	checksum   cmtp.Checksum         // standalone in worker
-	hashPool   *sync.Pool            // []uint32 pool, share with all worker
-	counterCh  chan []uint32         // result out, []uint32
+	counterCh  chan uint64           // result out, []uint32
+	bytesumCh  []chan *hashCarrier   // cross worker checksum chunk
+	hashPool   []*sync.Pool          //
 	count      bigcounter.BigCounter // counter for qps compute
-	workers    []*hashWorker         //
 	maxcnt     *big.Int              //
 	bigSecond  *big.Int              //
 	results    []uint16              // all hash info
@@ -194,6 +73,7 @@ type hashTester struct {
 	maxcounter int                   //
 	lockThread bool                  //
 	finished   bool                  //
+	killworker bool                  //
 	m          sync.Mutex            //
 	rm         sync.Mutex            // result locker
 }
@@ -211,11 +91,18 @@ func NewhashTester(size int,
 		lockThread = false
 	}
 
-	maxcounter := runtime.GOMAXPROCS(-1) / 4
-	if maxcounter < 1 {
-		maxcounter = 1
+	maxcounter := 1
+	maxworker := 1
+	if runtime.GOMAXPROCS(-1) > 12 {
+		maxcounter := runtime.GOMAXPROCS(-1) / 12
+		if maxcounter < 1 {
+			maxcounter = 1
+		}
+		// reserve one cpu for common task
+		maxworker = runtime.GOMAXPROCS(-1) - maxcounter - 1
+	} else {
+		maxworker = runtime.GOMAXPROCS(-1) - maxcounter
 	}
-	maxworker := runtime.GOMAXPROCS(-1) - maxcounter
 	if maxworker < 1 {
 		maxworker = 1
 	}
@@ -226,8 +113,8 @@ func NewhashTester(size int,
 	}
 
 	// larger chunksize use more memory and save more cpu
-	chunksize := 2048
-	countersize := maxworker * 2048 * 2048 * 4
+	chunksize := 1024
+	countersize := 2048
 	// 3228
 
 	if groupsize <= 0 {
@@ -242,17 +129,15 @@ func NewhashTester(size int,
 	//fmt.Printf("generator.Size() %d, generator.Max() = %s || %x => %s || %x\n", generator.Size(), generator.Max(), generator.Bytes(), maxcnt.String(), maxcnt.Bytes())
 
 	ht := &hashTester{
-		size:      size,
-		chunksize: chunksize,
-		groupsize: groupsize,
-		generator: generator,
-		checksum:  checksum,
-		hashPool: &sync.Pool{
-			New: newHashChunk(chunksize),
-		},
-		counterCh:  make(chan []uint32, countersize),
+		size:       size,
+		chunksize:  chunksize,
+		groupsize:  groupsize,
+		generator:  generator,
+		checksum:   checksum,
+		counterCh:  make(chan uint64, countersize),
+		bytesumCh:  make([]chan *hashCarrier, maxcounter),
+		hashPool:   make([]*sync.Pool, maxcounter),
 		count:      generator.New(),
-		workers:    make([]*hashWorker, maxworker),
 		maxcnt:     maxcnt,
 		bigSecond:  big.NewInt(int64(time.Second)),
 		results:    make([]uint16, math.MaxUint32+1),
@@ -269,6 +154,12 @@ func NewhashTester(size int,
 		lockThread: lockThread,
 	}
 	//
+	for i := 0; i < ht.maxcounter; i++ {
+		ht.bytesumCh[i] = make(chan *hashCarrier, ht.chunksize*ht.maxworker)
+		ht.hashPool[i] = &sync.Pool{
+			New: newHashChunk(chunksize),
+		}
+	}
 
 	// initial stat
 	ht.Stat()
@@ -280,11 +171,6 @@ func NewhashTester(size int,
 
 //
 func (ht *hashTester) run() {
-	defer func() {
-		// all done, close
-		close(ht.counterCh)
-		misc.Tpf(fmt.Sprintln(ht.maxworker, "worker exited"))
-	}()
 	var wg sync.WaitGroup
 	//misc.Tpf(fmt.Sprintln("lauch", ht.maxworker, "worker"))
 
@@ -292,11 +178,10 @@ func (ht *hashTester) run() {
 	genstep := big.NewInt(0)
 	genstep = genstep.Div(ht.maxcnt, big.NewInt(int64(ht.maxworker)))
 	genptr := big.NewInt(0)
-
+	ht.startts = time.Now()
 	for i := 0; i < ht.maxworker; i++ {
 		// initial worker
 		generator := ht.generator.New()
-		checksum := ht.checksum.New(0)
 		generator.SetInit(genptr.Bytes())
 		endptr := generator.New()
 		endptr.FromBigInt(big.NewInt(1).Mul(genstep, big.NewInt(int64(i+1))))
@@ -309,14 +194,15 @@ func (ht *hashTester) run() {
 		//println("generator#", i, "start from", generator.String(), "end at", generator.Max())
 		genptr = genptr.Add(genptr, genstep)
 
-		ht.workers[i] = newHashWorker(i, ht.size, generator, checksum, ht.hashPool, ht.counterCh)
-
 		wg.Add(1)
-		go ht.runWorker(ht.workers[i], &wg)
+		go ht.runWorker(uint32(i), generator, &wg)
 		//time.Sleep(2)
 	}
+	//
+	genptr = nil
+	genstep = nil
+
 	misc.Tpf(fmt.Sprintln(ht.maxworker, "worker running ..."))
-	ht.startts = time.Now()
 	ht.Stat()
 	wg.Wait()
 	ht.Stat()
@@ -325,20 +211,80 @@ func (ht *hashTester) run() {
 	default:
 		close(ht.closing)
 	}
+	// all done, close
+	for i, _ := range ht.bytesumCh {
+		close(ht.bytesumCh[i])
+	}
+	close(ht.counterCh)
+	misc.Tpf(fmt.Sprintln(ht.maxworker, "worker exited"))
 }
 
 //
-func (ht *hashTester) runWorker(worker *hashWorker, wg *sync.WaitGroup) {
+func (ht *hashTester) runWorker(index uint32, generator bigcounter.BigCounter, wg *sync.WaitGroup) {
 	defer func() {
-		//worker.Destroy()
 		wg.Done()
 	}()
 	if ht.lockThread {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 	}
+
+	var bchunk [][]byte
+
+	// TODO: compare select closing check and bool closing check
+
+	bytePool := sync.Pool{
+		New: newByteChunk(ht.chunksize, ht.size),
+	}
+
+	checksum := ht.checksum.New(0)
+	counteridx := uint32(0)
+	maxcounter := uint32(ht.maxcounter)
+	chunkcount := uint64(0)
+
+	hchunk := make([]*hashCarrier, ht.maxcounter)
+
 	//misc.Tpf(fmt.Sprintln("worker", worker.index, "running"))
-	worker.Run()
+	for ht.killworker == false {
+		bchunk = bytePool.Get().([][]byte)
+		for i := 0; i < ht.maxcounter; i++ {
+			hchunk[i] = ht.hashPool[i].Get().(*hashCarrier)
+			hchunk[i].ptr = -1
+		}
+		chunkcount = 0
+		for idx, _ := range bchunk {
+			// generate hash buffer
+			// FillBytes FillExpBytes
+			generator.FillExpBytes(bchunk[idx])
+
+			// hash and save result
+			bytesum := checksum.Checksum32(bchunk[idx])
+
+			counteridx = bytesum % maxcounter
+			hchunk[counteridx].ptr++
+			hchunk[counteridx].buf[hchunk[counteridx].ptr] = bytesum
+
+			// generator ++
+			if err := generator.Plus(); err != nil {
+				// last chunk
+				bytePool.Put(bchunk)
+				for i, _ := range hchunk {
+					ht.bytesumCh[i] <- hchunk[i]
+					chunkcount += uint64(hchunk[i].ptr) + 1
+				}
+				ht.counterCh <- chunkcount
+				return
+			}
+		}
+
+		bytePool.Put(bchunk)
+
+		for i, _ := range hchunk {
+			ht.bytesumCh[i] <- hchunk[i]
+			chunkcount += uint64(hchunk[i].ptr) + 1
+		}
+		ht.counterCh <- chunkcount
+	}
 	//misc.Tpf(fmt.Sprintln("worker", worker.index, "exited"))
 }
 
@@ -347,10 +293,12 @@ func (ht *hashTester) counter() {
 		ht.Close()
 	}()
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go ht.totalcounter(&wg)
+
 	for i := 0; i < ht.maxcounter; i++ {
 		wg.Add(1)
-		go ht.docounter(i, &wg)
-		//time.Sleep(2)
+		go ht.sumcounter(uint32(i), &wg)
 	}
 	misc.Tpf(fmt.Sprintln(ht.maxcounter, "counter running ..."))
 	wg.Wait()
@@ -360,27 +308,32 @@ func (ht *hashTester) counter() {
 	close(ht.closed)
 }
 
-func (ht *hashTester) docounter(i int, wg *sync.WaitGroup) {
+func (ht *hashTester) sumcounter(index uint32, wg *sync.WaitGroup) {
 	defer func() {
-		//println("counter", i, "exited")
 		wg.Done()
 	}()
-	if ht.lockThread {
+	if ht.lockThread && ht.maxcounter > 1 {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
 	}
-	for hchunk := range ht.counterCh {
-
-		for _, val := range hchunk {
-			ht.results[val]++
+	// []*hashCarrier
+	for sumbock := range ht.bytesumCh[index] {
+		for i := 0; i <= sumbock.ptr; i++ {
+			ht.results[sumbock.buf[i]]++
 		}
+		ht.hashPool[index].Put(sumbock)
+	}
 
+}
+
+func (ht *hashTester) totalcounter(wg *sync.WaitGroup) {
+	defer func() {
+		wg.Done()
+	}()
+	for count := range ht.counterCh {
 		ht.rm.Lock()
-		ht.count.AddUint64(uint64(len(hchunk)))
+		ht.count.AddUint64(count)
 		ht.rm.Unlock()
-
-		ht.hashPool.Put(hchunk)
-
 	}
 }
 
@@ -434,9 +387,7 @@ func (ht *hashTester) closer() {
 	defer func() {
 		ht.limit.Stop()
 		// stop all workers
-		for i, _ := range ht.workers {
-			go ht.workers[i].Destroy()
-		}
+		ht.killworker = true
 	}()
 	select {
 	case <-ht.limit.C:
@@ -463,7 +414,7 @@ func (ht *hashTester) Close() {
 	<-ht.closed
 	//misc.Tpffmt.Sprintln("closing"))
 	ht.results = nil
-	ht.hashPool = nil
+	//ht.hashPool = nil
 	//ht.collided = nil
 	//ht.distr = nil
 	//misc.Tpffmt.Sprintln("GC"))
@@ -1075,11 +1026,7 @@ func main() {
 	}()
 
 	if *cpus <= 0 {
-		if runtime.NumCPU() > 1 {
-			*cpus = runtime.NumCPU() - 1
-		} else {
-			*cpus = 1
-		}
+		*cpus = runtime.NumCPU()
 	}
 	runtime.GOMAXPROCS(*cpus)
 	if *size < 1 {

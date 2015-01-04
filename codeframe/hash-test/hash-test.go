@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"math"
@@ -19,24 +20,22 @@ import (
 	"github.com/wheelcomplex/preinit/misc"
 )
 
-// globe size of byteHash
-var globeHashSize int
-
-// globe size of chunk
-var globeChunkSize int
-
 // newByteChunk new [][]byte for sync.Pool.New
-func newByteChunk() interface{} {
-	bc := make([][]byte, globeChunkSize)
-	for i := 0; i < globeChunkSize; i++ {
-		bc[i] = make([]byte, globeHashSize)
+func newByteChunk(chunksize, hashsize int) func() interface{} {
+	return func() interface{} {
+		bc := make([][]byte, chunksize)
+		for i := 0; i < chunksize; i++ {
+			bc[i] = make([]byte, hashsize)
+		}
+		return bc
 	}
-	return bc
 }
 
 // newHashChunk new []uint32 for sync.Pool.New
-func newHashChunk() interface{} {
-	return make([]uint32, globeChunkSize)
+func newHashChunk(size int) func() interface{} {
+	return func() interface{} {
+		return make([]uint32, size)
+	}
 }
 
 // newHashSizeChunk new []uint32 with size limit
@@ -63,17 +62,22 @@ type hashWorker struct {
 // index, generator, checksum should be standalone for worker
 // hashPool, counterCh share with all worker
 func newHashWorker(index int,
+	hashsize int,
 	generator bigcounter.BigCounter,
 	checksum cmtp.Checksum,
 	hashPool *sync.Pool,
 	counterCh chan []uint32) *hashWorker {
+
+	tmp := hashPool.Get().([]uint32)
+	chunksize := len(tmp)
+	hashPool.Put(tmp)
 
 	hw := &hashWorker{
 		index:     index,
 		generator: generator,
 		checksum:  checksum,
 		bytePool: &sync.Pool{
-			New: newByteChunk,
+			New: newByteChunk(chunksize, hashsize),
 		},
 		hashPool:  hashPool,
 		counterCh: counterCh,
@@ -139,11 +143,12 @@ func (hw *hashWorker) Run() {
 			// generator ++
 			if err := hw.generator.Plus(); err != nil {
 
-				// worker exit
+				// worker exit, mark unused item
 				for i := idx + 1; i < len(bchunk); i++ {
-					hchunk[idx] = 0
+					hchunk[idx] = math.MaxUint32
 				}
 
+				// last chunk
 				hw.bytePool.Put(bchunk)
 				hw.counterCh <- hchunk
 
@@ -165,6 +170,7 @@ func (hw *hashWorker) closer() {
 //
 type hashTester struct {
 	size       int                   //
+	chunksize  int                   //
 	groupsize  int                   //
 	generator  bigcounter.BigCounter // standalone in worker
 	checksum   cmtp.Checksum         // standalone in worker
@@ -185,6 +191,7 @@ type hashTester struct {
 	closed     chan struct{}         //
 	closing    chan struct{}         //
 	maxworker  int                   //
+	maxcounter int                   //
 	lockThread bool                  //
 	finished   bool                  //
 	m          sync.Mutex            //
@@ -204,21 +211,22 @@ func NewhashTester(size int,
 		lockThread = false
 	}
 
-	// -1, reserve one cpu for commond task and counter
-	maxworker := runtime.GOMAXPROCS(-1) - 1
+	maxcounter := runtime.GOMAXPROCS(-1) / 4
+	if maxcounter < 1 {
+		maxcounter = 1
+	}
+	maxworker := runtime.GOMAXPROCS(-1) - maxcounter
 	if maxworker < 1 {
 		maxworker = 1
 	}
+	misc.Tpf("initialing %d workers, %d counters ...\n", maxworker, maxcounter)
 
 	if size < 1 {
 		size = 1
 	}
 
-	// set globe globeHashSize for pool new
-	globeHashSize = size
-
-	// larger globeChunkSize use more memory and save more cpu
-	globeChunkSize = 2048
+	// larger chunksize use more memory and save more cpu
+	chunksize := 2048
 	countersize := maxworker * 2048 * 2048 * 4
 	// 3228
 
@@ -235,11 +243,12 @@ func NewhashTester(size int,
 
 	ht := &hashTester{
 		size:      size,
+		chunksize: chunksize,
 		groupsize: groupsize,
 		generator: generator,
 		checksum:  checksum,
 		hashPool: &sync.Pool{
-			New: newHashChunk,
+			New: newHashChunk(chunksize),
 		},
 		counterCh:  make(chan []uint32, countersize),
 		count:      generator.New(),
@@ -256,6 +265,7 @@ func NewhashTester(size int,
 		closing:    make(chan struct{}, 128),
 		limit:      time.NewTimer(time.Duration(limit) * time.Second),
 		maxworker:  maxworker,
+		maxcounter: maxcounter,
 		lockThread: lockThread,
 	}
 	//
@@ -299,7 +309,7 @@ func (ht *hashTester) run() {
 		//println("generator#", i, "start from", generator.String(), "end at", generator.Max())
 		genptr = genptr.Add(genptr, genstep)
 
-		ht.workers[i] = newHashWorker(i, generator, checksum, ht.hashPool, ht.counterCh)
+		ht.workers[i] = newHashWorker(i, ht.size, generator, checksum, ht.hashPool, ht.counterCh)
 
 		wg.Add(1)
 		go ht.runWorker(ht.workers[i], &wg)
@@ -334,8 +344,26 @@ func (ht *hashTester) runWorker(worker *hashWorker, wg *sync.WaitGroup) {
 
 func (ht *hashTester) counter() {
 	defer func() {
-		//println("counter exited")
 		ht.Close()
+	}()
+	var wg sync.WaitGroup
+	for i := 0; i < ht.maxcounter; i++ {
+		wg.Add(1)
+		go ht.docounter(i, &wg)
+		//time.Sleep(2)
+	}
+	misc.Tpf(fmt.Sprintln(ht.maxcounter, "counter running ..."))
+	wg.Wait()
+	// worker exited
+	ht.Stat()
+	ht.summary()
+	close(ht.closed)
+}
+
+func (ht *hashTester) docounter(i int, wg *sync.WaitGroup) {
+	defer func() {
+		//println("counter", i, "exited")
+		wg.Done()
 	}()
 	if ht.lockThread {
 		runtime.LockOSThread()
@@ -354,8 +382,9 @@ func (ht *hashTester) counter() {
 		ht.hashPool.Put(hchunk)
 
 	}
-	// worker exited
-	ht.Stat()
+}
+
+func (ht *hashTester) summary() {
 	misc.Tpf(fmt.Sprintln("result computing"))
 	for idx, val := range ht.results {
 		ridx := idx % ht.groupsize
@@ -371,7 +400,6 @@ func (ht *hashTester) counter() {
 		}
 	}
 	misc.Tpf(fmt.Sprintln("result computed"))
-	close(ht.closed)
 }
 
 // show qps
@@ -472,7 +500,7 @@ func (ht *hashTester) Wait() <-chan struct{} {
 // type="text/ecmascript" for local svg file
 // type="text/javascript" for web browser
 //
-type SvgHandler struct {
+type SvgDrawServer struct {
 	size     int
 	distr    map[string][]uint64
 	collided map[string][]uint64
@@ -482,27 +510,19 @@ type SvgHandler struct {
 	tail     []byte
 	m        sync.Mutex
 	wait     chan struct{}
+	count    uint64
 }
 
 //
-func newSvgHandler(size int) *SvgHandler {
+func newSvgDrawServer(size int) *SvgDrawServer {
 	if size <= 0 {
 		size = 1
 	}
-
-	// <?xml version="1.0" standalone="no"?>
-	// <svg width="%100" height="%100" version="1.1" xmlns="http://www.w3.org/2000/svg">
-	/*
-		<br />
-		<h6>hash test result</h6>
-		<br />
-		<svg width="1340" height="640" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-	*/
 	var header []byte = []byte(`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
 
-<svg width="100%" height="100%" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<svg width="100%" height="660" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 
 <!-- from https://www.cyberz.org/projects/SVGPan/SVGPan.js -->
 <script type="text/ecmascript"><![CDATA[
@@ -791,21 +811,26 @@ function handleMouseUp(evt) {
 
 <g id="viewport" transform="scale(1, 1) translate(0, 0)">
 
-<line x1="40" y1="500" x2="1300" y2="500" style="stroke:#2E9AFE; stroke-width:1" />
+<!-- X line 80 - 1280 = 10180
+<line x1="40" y1="500" x2="10260" y2="500" style="stroke:#2E9AFE; stroke-width:1" />
+-->
 
 <text x="28" y="506" fill="#FF3D82" font-size="16">X</text>
 
+<!-- Y line 20 - 500 = 480 
 <line x1="80" y1="20" x2="80" y2="640" style="stroke:#2E9AFE; stroke-width:1" />
+-->
 
 <text x="74" y="18" fill="#FF3D82" font-size="16">Y</text>
 
-<text x="64" y="520" fill="#FF3D82" font-size="24">0</text>`)
+<text x="64" y="520" fill="#FF3D82" font-size="24">0</text>
+`)
 
 	var tail []byte = []byte(`
 </g>
 </svg>`)
 
-	return &SvgHandler{
+	return &SvgDrawServer{
 		size:     size,
 		header:   header,
 		tail:     tail,
@@ -818,35 +843,39 @@ function handleMouseUp(evt) {
 }
 
 //
-func (sh *SvgHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+func (sh *SvgDrawServer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	sh.m.Lock()
 	defer sh.m.Unlock()
-	//w.Header().Set("Content-Type", "text/html;charset=UTF-8")
-	//w.Header().Set("Content-Type", "image/svg;charset=UTF-8")
-	//w.Header().Set("Content-Type", "image/svg+xml;charset=UTF-8")
-	w.Header().Set("Content-Type", "image/svg+xml")
-	//w.Header().Set("Content-Type", "text/plain")
-	//w.Header().Set("Content-Type", "text/html")
+	sh.count++
+
+	w.Header().Set("Content-Type", "image/svg+xml;charset=UTF-8")
 	// Refresh: 0;url=my_view_page.php
-	//w.Header().Set("Refresh", "5;"+req.URL.RequestURI())
+	//w.Header().Set("Refresh", "15;"+req.URL.RequestURI())
 	//
 	// create desc
 	//
 	sh.svgbuf = sh.svgbuf[:0]
-	desc := ""
+
+	// sh.header
+	sh.svgbuf = append(sh.svgbuf, sh.header...)
+
+	color := uint8(0)
 	if len(sh.distr) > 0 {
+		xname := 180
 		for idx, _ := range sh.distr {
-			desc += " " + idx
+			color++
+			if color == math.MaxUint8 {
+				color = 1
+			}
+			sh.svgbuf = append(sh.svgbuf, []byte(`<text x="`+fmt.Sprintf("%d", xname)+`" y="560" fill="`+fmt.Sprintf("#%02x9AFE", color)+`" font-size="24">`+idx+`</text>`+"\n")...)
+			xname += (len(idx)*2 + 20)
 		}
 	} else {
-		desc = " testing, please wait ..."
+		// desc
+		sh.svgbuf = append(sh.svgbuf, []byte(`<text x="180" y="560" fill="#DF3D82" font-size="24"> testing, please wait ...</text>`+"\n")...)
 	}
-
-	// desc
-	sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%s%s%s", `<text x="180" y="560" fill="#DF3D82" font-size="24">`, desc, `</text>`))...)
-
 	// time stamp
-	sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%s%s%s", `<text x="180" y="600" fill="#DF3D82" font-size="24">`, time.Now().String(), `</text>`))...)
+	sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%s#%d, %s%s", `<text x="180" y="600" fill="#DF3D82" font-size="24">`, sh.count, time.Now().String(), `</text>`+"\n"))...)
 
 	//
 	// create svg
@@ -865,53 +894,124 @@ func (sh *SvgHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	   大写字母表示定位方式使用绝对位置，小写则使用相对定位
 	*/
-	xstart := 80
-	ystart := 500
-	//xend := 1300
-	//yend := 20
-	// ylen = 480
-	// xlen = 1220
 
-	// start of path
-	sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("\n<path d=\"M%d %d S", xstart, ystart))...)
+	/*
+		<!-- X line 80 - 1280 = 1180-->
+		<line x1="40" y1="500" x2="1280" y2="500" style="stroke:#2E9AFE; stroke-width:1" />
+
+		<!-- Y line 20 - 500 = 480 -->
+		<line x1="80" y1="20" x2="80" y2="640" style="stroke:#2E9AFE; stroke-width:1" />
+	*/
+
+	xstart := 80
+
+	ystart := 500
+	yend := 20
+
+	yavg := uint64(((ystart - yend) / 2) + yend)
+
+	sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf(`<text x="%d" y="%d" fill="#DF3D82" font-size="24">%d</text>`, xstart-40, yavg+8, yavg)+"\n")...)
+
+	// draw x/y line
+	xstep := 1
+	maxlen := 1280
+	if sh.size <= maxlen {
+		xstep = maxlen / sh.size
+	}
+	xnextlen := sh.size / maxlen
+	// x line
+	sh.svgbuf = append(sh.svgbuf, []byte("\n"+`<line x1="40" y1="500" x2="`+"\n")...)
+	sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%d", maxlen+xstart))...)
+	sh.svgbuf = append(sh.svgbuf, []byte(`" y2="500" style="stroke:#2E9AFE; stroke-width:1" />`+"\n")...)
+	// fixed y line
+	sh.svgbuf = append(sh.svgbuf, []byte("\n"+`<line x1="80" y1="20" x2="80" y2="640" style="stroke:#2E9AFE; stroke-width:1" />`+"\n")...)
+
+	// fixed x line
+	//sh.svgbuf = append(sh.svgbuf, []byte("\n"+`<line x1="40" y1="500" x2="1280" y2="500" style="stroke:#2E9AFE; stroke-width:1" />`)...)
 
 	if len(sh.distr) > 0 {
 		// draw path
-		sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%s", "140 30 180 90 20 160"))...)
+		color = uint8(0)
+		for name, _ := range sh.distr {
+			color++
+			if color == math.MaxUint8 {
+				color = 1
+			}
+			// start of path
+			sh.svgbuf = append(sh.svgbuf, []byte("\n<path d=\"M")...)
+
+			dist := uint64(0)
+			avgdist := uint64(0)
+			for i := 0; i < len(sh.distr[name]); i++ {
+				dist += sh.distr[name][i]
+				//if maxdist < sh.distr[name][i] {
+				//	maxdist = sh.distr[name][i]
+				//}
+				//if mindist > sh.distr[name][i] {
+				//	mindist = sh.distr[name][i]
+				//}
+			}
+			avgdist = dist / uint64(len(sh.distr[name]))
+			xptr := xstart
+			sh.buf = sh.buf[:0]
+			xpos := 0
+			xcnt := 0
+			ypre := uint64(0)
+			for i := 0; i < len(sh.distr[name]); i++ {
+				dist = (sh.distr[name][i] - avgdist) + yavg
+				if i-xpos >= xnextlen {
+					xpos = i
+					xptr = xcnt*xstep + xstart
+					xcnt++
+				}
+				if ypre != dist || i == len(sh.distr[name])-1 {
+					ypre = dist
+					println("#", sh.count, "xnextlen", xnextlen, "i", i, "xcnt", xcnt, "xstep", xstep, "xptr", xptr, "sh.distr[name][i]", sh.distr[name][i], "avgdist", avgdist, "raw", (sh.distr[name][i] - avgdist), "dist", dist)
+				}
+				if i == 0 {
+					sh.buf = append(sh.buf, []byte(fmt.Sprintf("%d %d S", xptr, dist))...)
+				} else {
+					sh.buf = append(sh.buf, []byte(fmt.Sprintf("%d %d ", xptr, dist))...)
+				}
+			}
+			sh.buf = bytes.Trim(sh.buf, " ")
+			sh.svgbuf = append(sh.svgbuf, sh.buf...)
+			// end of path
+			sh.svgbuf = append(sh.svgbuf, []byte(`" style="fill: none; stroke: `+fmt.Sprintf("#%02x9AFE", color)+`; stroke-width: 2;" />`+"\n")...)
+		}
+
+		//
+		// sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%s", "140 30 180 90 20 160"))...)
 	} else {
 		// nothing to draw
-		sh.svgbuf = append(sh.svgbuf, []byte(fmt.Sprintf("%d %d  %d %d", xstart+1, ystart-1, xstart+1, ystart-1))...)
 	}
 
-	// end of path
-	sh.svgbuf = append(sh.svgbuf, []byte(`" style="fill: none; stroke: #DF3D82; stroke-width: 2;" />`)...)
+	// sh.tail
+	sh.svgbuf = append(sh.svgbuf, sh.tail...)
 
 	outputlen := len(sh.svgbuf)
 	//
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", outputlen+len(sh.header)+len(sh.tail)))
-	//
-	w.Write(sh.header)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", outputlen))
 	//
 	w.Write(sh.svgbuf[:outputlen])
-	//
-	w.Write(sh.tail)
-}
-
-func (sh *SvgHandler) Close() {
-	select {
-	case <-sh.wait:
-	default:
-		close(sh.wait)
-	}
+	println("")
 }
 
 //
-func (sh *SvgHandler) Wait() <-chan struct{} {
+func (sh *SvgDrawServer) Close() {
+	defer func() {
+		recover()
+	}()
+	close(sh.wait)
+}
+
+//
+func (sh *SvgDrawServer) Wait() <-chan struct{} {
 	return sh.wait
 }
 
 //
-func (sh *SvgHandler) String() string {
+func (sh *SvgDrawServer) String() string {
 	sh.m.Lock()
 	defer sh.m.Unlock()
 	sh.buf = sh.buf[:0]
@@ -931,7 +1031,7 @@ func (sh *SvgHandler) String() string {
 }
 
 //
-func (sh *SvgHandler) Fill(name string, filldistr, fillcollided []uint64) {
+func (sh *SvgDrawServer) Fill(name string, filldistr, fillcollided []uint64) {
 	sh.m.Lock()
 	defer sh.m.Unlock()
 	if _, ok := sh.distr[name]; ok == false {
@@ -990,8 +1090,8 @@ func main() {
 		*groupsize = 16
 	}
 
-	if *runlimit < 10 {
-		*runlimit = 10
+	if *runlimit < 1 {
+		*runlimit = 1
 	}
 
 	svgl, svgerr := net.Listen("tcp", *svgport)
@@ -1017,15 +1117,15 @@ func main() {
 	fmt.Printf(" ...\n")
 
 	//
-	// svghandler implated
+	// svgServer implated
 	//
 	// ServeHTTP(http.ResponseWriter, *http.Request)
 	//
 
-	svghandler := newSvgHandler(*groupsize)
+	svgServer := newSvgDrawServer(*groupsize)
 
 	go func() {
-		svgerr = http.Serve(svgl, svghandler)
+		svgerr = http.Serve(svgl, svgServer)
 		if svgerr != nil {
 			misc.Tpf("Serve at %s failed: %s\n", svgerr.Error())
 			os.Exit(1)
@@ -1058,15 +1158,15 @@ func main() {
 		}
 		<-waitCh
 		distr, collided := ht.Result()
-		svghandler.Fill(idx, distr, collided)
+		svgServer.Fill(idx, distr, collided)
 		count, qps, esp := ht.Stat()
 		misc.Tpf("End %s, size %d, count %s, esp %v, qps %s\n", idx, *size, count, esp, qps)
 		misc.Tpf("%s test done\n", idx)
 	}
 
-	fmt.Print(svghandler.String())
+	//fmt.Print(svgServer.String())
 
 	misc.Tpf("all %d done\n", len(allhasher))
 
-	<-svghandler.Wait()
+	<-svgServer.Wait()
 }

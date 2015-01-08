@@ -22,6 +22,9 @@ type CMsg struct {
 
 // String return formated string of CMsg
 func (mc *CMsg) String() string {
+	if mc.Err == nil {
+		return fmt.Sprintf("code %d, id %d, msg: %s, error: <nil>", mc.Code, mc.Id, mc.Msg)
+	}
 	return fmt.Sprintf("code %d, id %d, msg: %s, error: %s", mc.Code, mc.Id, mc.Msg, mc.Err.Error())
 }
 

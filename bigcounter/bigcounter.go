@@ -222,10 +222,14 @@ func Newfix64base(size int) *fix64base {
 		size = 8
 	}
 	max := uint64(1)
-	for i := 0; i < size*8; i++ {
-		max = max * 2
+	if size == 8 {
+		max = math.MaxUint64 - 1
+	} else {
+		for i := 0; i < size*8; i++ {
+			max = max * 2
+		}
+		max = max - 1
 	}
-	max = max - 1
 	return &fix64base{
 		size: size,
 		last: size - 1,

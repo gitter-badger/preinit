@@ -18,6 +18,8 @@ import (
 	"github.com/wheelcomplex/preinit/bigcounter"
 	"github.com/wheelcomplex/preinit/cmtp"
 	"github.com/wheelcomplex/preinit/misc"
+
+	"tpf"
 )
 
 // newByteChunk new [][]byte for sync.Pool.New
@@ -107,6 +109,8 @@ func NewhashTester(size int,
 		maxworker = 1
 	}
 	misc.Tpf("initialing %d workers, %d counters ...\n", maxworker, maxcounter)
+	tpf.Tpf("initialing %d workers, %d counters ...\n", maxworker, maxcounter)
+	os.Exit(1)
 
 	if size < 1 {
 		size = 1

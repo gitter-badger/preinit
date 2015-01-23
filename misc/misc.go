@@ -401,6 +401,7 @@ func TimeFormatNext(format string, from time.Time) time.Time {
 
 // Tpf write msg with time suffix to stdout
 func Tpf(format string, v ...interface{}) {
+	println("calling tpf2")
 	ts := fmt.Sprintf("[%s] ", time.Now().String())
 	msg := fmt.Sprintf(format, v...)
 	fmt.Printf("%s%s", ts, msg)

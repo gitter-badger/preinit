@@ -10,9 +10,10 @@ package main
 
 import (
 	"fmt"
-	"github.com/wheelcomplex/preinit"
 	"runtime"
 	"time"
+
+	"github.com/wheelcomplex/preinit"
 )
 
 func TimePrintf(format string, v ...interface{}) {

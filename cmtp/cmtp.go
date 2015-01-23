@@ -44,6 +44,8 @@ import (
 // in benchmark channel buffer size greate then 1024 got max channel forward speed
 const CHANNEL_BUFFER_SIZE int = 2048
 
+const CHANNEL_INIT_SIZE int = 16
+
 // max empty io read
 const CMTP_MAX_EMPTY_IO int = 16
 

@@ -1,96 +1,37 @@
-// Package preinit provides utils for go daemon programing.
+// Package preinit provides base utils for go daemon programing.
 /*
-
-1. log -- wrapper
-2. args -- wrapper
+3. listen master(fork+fd pass)
 */
 
 package preinit
 
+/*
+
+#include "setproctitle.h"
+
+*/
+import "C"
+
+// C.spt_init1 defined in setproctitle.h
 import (
-	"io"
 	"os"
 	"path"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
+	"unsafe"
 
 	"github.com/wheelcomplex/preinit/logger"
 	"github.com/wheelcomplex/preinit/options"
 )
 
-// misc functions
-
-// http://godoc.org/github.com/sluu99/uuid fromstr
-
-// TimeFormatNext find next time.Time of format
-// if from == time.Time{}, from = time.Now()
-// return next time.Time or time.Time{} for no next avaible
-func TimeFormatNext(format string, from time.Time) time.Time {
-	var nextT time.Time
-	if format == "" {
-		return nextT
-	}
-	// Mon Jan 2 15:04:05 -0700 MST 2006
-	// 2006-01-02-15-04-MST
-	/*
-		"Nanosecond",
-		"Microsecond",
-		"Millisecond",
-		"Second",
-		"Minute",
-		"Hour",
-		"Day",
-		"Week",
-		"Month1",
-		"Month2",
-		"Month3",
-		"Month4",
-		"year1",
-		"year2",
-	*/
-	//
-	timeSteps := []time.Duration{
-		time.Nanosecond,
-		time.Microsecond,
-		time.Millisecond,
-		time.Second,
-		time.Minute,
-		time.Hour,
-		time.Hour * 24,
-		time.Hour * 24 * 7,
-		time.Hour * 24 * 28,
-		time.Hour * 24 * 29,
-		time.Hour * 24 * 30,
-		time.Hour * 24 * 31,
-		time.Hour * 24 * 365,
-		time.Hour * 24 * 366,
-	}
-	if from.Equal(time.Time{}) {
-		from = time.Now()
-	}
-	// cut to current format ts
-	nowts, err := time.Parse(format, from.Format(format))
-	//fmt.Printf("FORMAT: %v, FROM: %v || %v, CUT: %v || %v\n", format, from.Format(format), from, nowts.Format(format), nowts)
-	if err != nil {
-		// invalid format
-		//fmt.Fprintf(os.Stderr, "TimeFormatNext: invalid format: %s\n", format)
-		return nextT
-	}
-	nowstr := nowts.Format(format)
-	for _, val := range timeSteps {
-		nextT = nowts.Add(val)
-		if nowstr != nextT.Format(format) {
-			return nextT
-		}
-	}
-	return nextT
-}
+// default opt Parser
+// default opt Parser
+// do not include ExecFile
+var opts = options.NewOptParser(os.Args[1:])
 
 // SetGoMaxCPUs set runtime.GOMAXPROCS, -1 for use all cpus, 0 for use cpus - 1, other for use N cpus
-// at using less one cpu
+// at less one cpu
 // return final using cpus
 func SetGoMaxCPUs(n int) int {
 	switch {
@@ -107,383 +48,6 @@ func SetGoMaxCPUs(n int) int {
 	}
 	return runtime.GOMAXPROCS(-1)
 }
-
-/// multi-channel logger wrapper
-
-// NewRotFile create new WriteCloser for logger
-func NewRotFile(filename string, mode os.FileMode, max int, size int, line int, format string) *logger.RotFile_t {
-	return logger.NewRotFile(filename, mode, max, size, line, format)
-
-}
-
-// NewTrash ceate dummy WriteCloser for logger
-func NewTrash() *logger.Trash_t {
-	return logger.NewTrash()
-}
-
-func AddListlog(name string, output io.Writer) {
-	Logger.AddListlog(name, output)
-}
-
-func AddListlogCloser(name string, output io.WriteCloser) {
-	Logger.AddListlogCloser(name, output)
-}
-
-func GetListLog() map[string]struct{} {
-	return Logger.GetListLog()
-}
-
-func RemoveListLog(list []string) {
-	Logger.RemoveListLog(list)
-}
-
-func Applog(v ...interface{}) {
-	Logger.Applog(v...)
-}
-
-func Applogf(format string, v ...interface{}) {
-	Logger.Applogf(format, v...)
-}
-
-func Applogln(v ...interface{}) {
-	Logger.Applogln(v...)
-}
-
-func CloseLogger() {
-	Logger.Close()
-}
-
-func CloseLogChannel(name string) {
-	Logger.CloseLogChannel(name)
-}
-
-func Errlog(v ...interface{}) {
-	Logger.Errlog(v...)
-}
-
-func Errlogf(format string, v ...interface{}) {
-	Logger.Errlogf(format, v...)
-}
-
-func Errlogln(v ...interface{}) {
-	Logger.Errlogln(v...)
-}
-
-func Fatal(v ...interface{}) {
-	Logger.Fatal(v...)
-}
-
-func Fatalf(format string, v ...interface{}) {
-	Logger.Fatalf(format, v...)
-}
-
-func Fatalln(v ...interface{}) {
-	Logger.Fatalln(v...)
-}
-
-func Listlog(v ...interface{}) {
-	Logger.Listlog(v...)
-}
-
-func Listlogf(format string, v ...interface{}) {
-	Logger.Listlogf(format, v...)
-}
-
-func Listlogln(v ...interface{}) {
-	Logger.Listlogln(v...)
-}
-
-func Panic(v ...interface{}) {
-	Logger.Panic(v...)
-}
-
-func Panicf(format string, v ...interface{}) {
-	Logger.Panicf(format, v...)
-}
-
-func Panicln(v ...interface{}) {
-	Logger.Panicln(v...)
-}
-
-func Prefix() string {
-	return Logger.Prefix()
-}
-
-func Print(v ...interface{}) {
-	Logger.Print(v...)
-}
-
-func Printf(format string, v ...interface{}) {
-	Logger.Printf(format, v...)
-}
-
-func Println(v ...interface{}) {
-	Logger.Println(v...)
-}
-
-func SetFlags(flag int) {
-	Logger.SetFlags(flag)
-}
-
-func SetPrefix(prefix string) {
-	Logger.SetPrefix("[" + prefix + "-" + strconv.Itoa(os.Getpid()) + "] ")
-}
-
-func SetWriteCloser(name string, output io.WriteCloser) {
-	Logger.SetWriteCloser(name, output)
-}
-
-func SetWriter(name string, output io.Writer) {
-	Logger.SetWriter(name, output)
-}
-
-func Stderr(v ...interface{}) {
-	Logger.Stderr(v...)
-}
-
-func Stderrf(format string, v ...interface{}) {
-	Logger.Stderrf(format, v...)
-}
-
-func Stderrln(v ...interface{}) {
-	Logger.Stderrln(v...)
-}
-
-func Stdout(v ...interface{}) {
-	Logger.Stdout(v...)
-}
-
-func Stdoutf(format string, v ...interface{}) {
-	Logger.Stdoutf(format, v...)
-}
-
-func Stdoutln(v ...interface{}) {
-	Logger.Stdoutln(v...)
-}
-
-func Syslog(v ...interface{}) {
-	Logger.Syslog(v...)
-}
-
-func Syslogf(format string, v ...interface{}) {
-	Logger.Syslogf(format, v...)
-}
-
-func Syslogln(v ...interface{}) {
-	Logger.Syslogln(v...)
-}
-
-// Debug write msg to debug
-func Debug(v ...interface{}) {
-	Logger.Debug(v...)
-}
-
-func Debugf(format string, v ...interface{}) {
-	Logger.Debugf(format, v...)
-}
-
-func Debugln(v ...interface{}) {
-	Logger.Debugln(v...)
-}
-
-func WriteToList(names []string, v string) {
-	Logger.WriteToList(names, v)
-}
-
-/// end of multi-channel logger
-
-/// command line parser
-
-// wrapper of options.func
-func SetProcTitle(title string) {
-	options.SetProcTitle(title)
-}
-
-// wrapper of options.func
-func SetProcTitlePrefix(prefix string) {
-	options.SetProcTitlePrefix(prefix)
-}
-
-// wrapper of options.func
-func SetProcTitleSuffix(suffix string) {
-	options.SetProcTitleSuffix(suffix)
-}
-
-// wrapper of options.CmdString()
-func CmdString() string {
-	return opts.CmdString()
-}
-
-// wrapper of options.func
-func ArgsString() string {
-	return opts.ArgsString()
-}
-
-// wrapper of options.func
-func SetVersion(format string, a ...interface{}) string {
-	return opts.SetVersion(format, a...)
-}
-
-// wrapper of options.func
-func SetDescription(format string, a ...interface{}) string {
-	return opts.SetDescription(format, a...)
-}
-
-// wrapper of options.func
-func SetNotes(format string, a ...interface{}) string {
-	return opts.SetNotes(format, a...)
-}
-
-// Powered set powered string of usage
-// empty val to return current string
-func Powered(val string) string {
-	return opts.Powered(val)
-}
-
-// wrapper of options.func
-func SetOption(long string, defstring string, format string, a ...interface{}) string {
-	return opts.SetOption(long, defstring, format, a...)
-}
-
-// wrapper of options.func
-func SetOptions(long string, defval []string, format string, a ...interface{}) string {
-	return opts.SetOptions(long, defval, format, a...)
-}
-
-// wrapper of options.func
-func SetFlag(long string, format string, a ...interface{}) string {
-	return opts.SetFlag(long, format, a...)
-}
-
-// wrapper of options.func
-func SetNoFlags(defval []string, format string, a ...interface{}) string {
-	return opts.SetNoFlags(defval, format, a...)
-}
-
-// wrapper of options.func
-func VersionString() string {
-	return opts.VersionString()
-}
-
-// wrapper of options.func
-func DescriptionString() string {
-	return opts.DescriptionString()
-}
-
-// wrapper of options.func
-func NoteString() string {
-	return opts.NoteString()
-}
-
-// wrapper of options.func
-func OptionString() string {
-	return opts.OptionString()
-}
-
-// wrapper of options.func
-func FlagString() string {
-	return opts.FlagString()
-}
-
-// wrapper of options.func
-func NoFlagString() string {
-	return opts.NoFlagString()
-}
-
-// wrapper of options.func
-func CommandString() string {
-	return opts.CommandString()
-}
-
-// wrapper of options.func
-func UsageString() string {
-	return opts.UsageString()
-}
-
-// wrapper of options.func
-func Usage() {
-	// TODO: show only user defined option when command line without --preinit
-	// split use opt from --preinit opt
-	// use --pre prefix for all pre option
-	opts.Usage()
-}
-
-// wrapper of opts.Parse
-func Parse(args []string) {
-	opts.Parse(args)
-}
-
-// wrapper of opts.ParseString
-func ParseString(line string) {
-	opts.ParseString(line)
-}
-
-// wrapper of options.func
-func GetParserNoFlags() []string {
-	return opts.GetParserNoFlags()
-}
-
-// wrapper of options.func
-func GetParserNoFlagString() string {
-	return opts.GetParserNoFlagString()
-}
-
-// wrapper of options.func
-func GetNoFlags() []string {
-	return opts.GetNoFlags()
-}
-
-// wrapper of options.func
-func GetNoFlagString() string {
-	return opts.GetNoFlagString()
-}
-
-// wrapper of options.func
-func GetStringList(flag string) []string {
-	return opts.GetStringList(flag)
-}
-
-// wrapper of options.func
-func GetString(flag string) string {
-	return opts.GetString(flag)
-}
-
-// wrapper of options.func
-func GetStrings(flag string) string {
-	return opts.GetStrings(flag)
-}
-
-// wrapper of options.func
-func GetInt(flag string) int {
-	return opts.GetInt(flag)
-}
-
-// wrapper of options.func
-func GetInts(flag string) []int {
-	return opts.GetInts(flag)
-}
-
-// wrapper of options.func
-func GetBool(flag string) bool {
-	return opts.GetBool(flag)
-}
-
-// wrapper of options.func
-func GetFlag(flag string) bool {
-	return opts.GetFlag(flag)
-}
-
-// wrapper of options.func
-func DelParserFlag(key, value string) {
-	opts.DelParserFlag(key, value)
-}
-
-// wrapper of options.func
-func SetParserFlag(key, value string) {
-	opts.SetParserFlag(key, value)
-}
-
-/// end of command line parser
 
 //// VARS ////
 
@@ -509,20 +73,16 @@ var ArgFullLine string
 // convert Args[0] to absolute file path
 var ExecFile string
 
-// orig proc title
-var OrigProcTitle string
-
 // default opt Parser
-var opts *options.OptParser_t
+// default opt Parser
+// do not include ExecFile
+var opts = options.NewOptParser(os.Args[1:])
 
 // initial default command line parser
 func argsInit() {
 	Args = make([]string, 0, 0)
 	Args = append(Args, os.Args...)
 	ExecFile = options.GetExecFileByPid(os.Getpid())
-	// default opt Parser
-	// do not include ExecFile
-	opts = options.NewOptParser(Args[1:])
 	ArgLine = options.ArgsToSpLine(Args)
 	ArgFullLine = options.CleanArgLine(os.Args[0] + " " + opts.String())
 	//
@@ -542,77 +102,6 @@ func CleanExit(code int) {
 	os.Stderr.Sync()
 	PreExit()
 	os.Exit(code)
-}
-
-// GetOpenListOfPid return opened file list of pid
-// return empty map if no file opened
-func GetOpenListOfPid(pid int) []*os.File {
-	var err error
-	var file *os.File
-	var filelist []string
-
-	fds := make([]*os.File, 0, 0)
-
-	file, err = os.Open("/proc/" + strconv.Itoa(pid) + "/fd/")
-	if err != nil {
-		Logger.Errlogf("ERROR: %s\n", err)
-		return fds
-	}
-	defer file.Close()
-
-	filelist, err = file.Readdirnames(1024)
-	if err != nil {
-		if err == io.EOF {
-			Logger.Errlogf("read dir end: %s, %v\n", err, filelist)
-		} else {
-			Logger.Errlogf("ERROR: %s\n", err)
-			return fds
-		}
-	}
-	/*
-		rhinofly@rhinofly-Y570:~/data/liteide/build$ ls -l /proc/self/fd/
-		total 0
-		lrwx------ 1 rhinofly rhinofly 64 Nov  4 09:47 0 -> /dev/pts/16
-		lrwx------ 1 rhinofly rhinofly 64 Nov  4 09:47 1 -> /dev/pts/16
-		lrwx------ 1 rhinofly rhinofly 64 Nov  4 09:47 2 -> /dev/pts/16
-		lr-x------ 1 rhinofly rhinofly 64 Nov  4 09:47 3 -> /proc/29484/fd
-	*/
-	tmpid := strconv.Itoa(int(file.Fd()))
-	if len(filelist) > 0 {
-		for idx := range filelist {
-			//func NewFile(fd uintptr, name string) *File
-			link, _ := os.Readlink("/proc/" + strconv.Itoa(pid) + "/fd/" + filelist[idx])
-			if filelist[idx] == tmpid {
-				//Logger.Errlogf("file in %d dir: %d, %v, link %s, is me %v\n", pid, idx, filelist[idx], link, file.Name())
-				continue
-			}
-			//Logger.Errlogf("file in %d dir: %d, %v -> %s\n", pid, idx, filelist[idx], link)
-			fd, err := strconv.Atoi(filelist[idx])
-			if err != nil {
-				Logger.Errlogf("strconv.Atoi(%v): %s\n", filelist[idx], err)
-				continue
-			}
-			fds = append(fds, os.NewFile(uintptr(fd), link))
-		}
-	}
-	return fds
-}
-
-// base command line args process
-
-// SafeFileName replace invalid char with _
-// valid char is . 0-9 _ - A-Z a-Z /
-func SafeFileName(name string) string {
-	name = filepath.Clean(name)
-	newname := make([]byte, 0, len(name))
-	for _, val := range name {
-		if (val >= '0' && val <= '9') || (val >= 'A' && val <= 'Z') || (val >= 'a' && val <= 'z') || val == '_' || val == '-' || val == '/' {
-			newname = append(newname, byte(val))
-		} else {
-			newname = append(newname, '_')
-		}
-	}
-	return string(newname)
 }
 
 // autoAppDir return dir string base on prefix or executing file
@@ -777,13 +266,98 @@ func updatePreDirs(key, value string) {
 	preDirs[key] = value
 }
 
+// SetProcTitle
+
+const (
+	// These values must match the return values for spt_init1() used in C.
+	HaveNone        = 0
+	HaveNative      = 1
+	HaveReplacement = 2
+)
+
+var (
+	HaveSetProcTitle int
+)
+
+// orig proc title
+var OrigProcTitle string
+
+//
+func setproctitle_init() {
+	if len(OrigProcTitle) == 0 {
+		OrigProcTitle = CleanArgLine(os.Args[0] + " " + opts.String())
+	}
+	HaveSetProcTitle = int(C.spt_init1())
+
+	if HaveSetProcTitle == HaveReplacement {
+		newArgs := make([]string, len(os.Args))
+		for i, s := range os.Args {
+			// Use cgo to force go to make copies of the strings.
+			cs := C.CString(s)
+			newArgs[i] = C.GoString(cs)
+			C.free(unsafe.Pointer(cs))
+		}
+		os.Args = newArgs
+
+		env := os.Environ()
+		for _, kv := range env {
+			skv := strings.SplitN(kv, "=", 2)
+			os.Setenv(skv[0], skv[1])
+		}
+
+		argc := C.int(len(os.Args))
+		arg0 := C.CString(os.Args[0])
+		defer C.free(unsafe.Pointer(arg0))
+
+		C.spt_init2(argc, arg0)
+
+		// Restore the original title.
+		SetProcTitle(os.Args[0])
+	}
+}
+
+func SetProcTitle(title string) {
+	cs := C.CString(title)
+	defer C.free(unsafe.Pointer(cs))
+	C.spt_setproctitle(cs)
+}
+
+func SetProcTitlePrefix(prefix string) {
+	title := prefix + OrigProcTitle
+	cs := C.CString(title)
+	defer C.free(unsafe.Pointer(cs))
+	C.spt_setproctitle(cs)
+}
+
+func SetProcTitleSuffix(prefix string) {
+	title := OrigProcTitle + prefix
+	cs := C.CString(title)
+	defer C.free(unsafe.Pointer(cs))
+	C.spt_setproctitle(cs)
+}
+
+/*
+nginx SetProcTitle:
+
+root      1861  0.0  0.0  90220  1492 ?        Ss   Oct20   0:00 nginx: master process /usr/sbin/nginx -c /etc/nginx/nginx.conf
+www-data  1862  0.0  0.0  90500  2312 ?        S    Oct20   0:00 nginx: worker process
+www-data  1863  0.0  0.0  90500  2056 ?        S    Oct20   0:07 nginx: worker process
+www-data  1864  0.0  0.0  90500  2056 ?        S    Oct20   0:07 nginx: worker process
+www-data  1866  0.0  0.0  90500  2056 ?        S    Oct20   0:07 nginx: worker process
+
+*/
+
+// end of SetProcTitle
+
+var preCfg = &preCfgT{}
+
 func init() {
+	setproctitle_init()
 	SetForkState(FORK_PARENT)
 	PID = os.Getpid()
 	PIDSTR = strconv.Itoa(PID)
 	loggerInit()
 	argsInit()
-	OrigProcTitle = options.OrigProcTitle
 	//
 	// TODO: proc args and add debug/app logfile, fdpass(tcp/udp)
 	/*
@@ -813,37 +387,63 @@ func init() {
 		--fds name/list/of/fds,from --listens
 
 	*/
+
+	type preCfgT struct {
+		chroot       string
+		user         string
+		group        string
+		rootdir      string
+		vardir       string
+		rundir       string
+		tmpdir       string
+		datadir      string
+		logdir       string
+		errlogfile   string
+		applogfile   string
+		debuglogfile string
+		logrotation  int
+		logmaxsize   int
+		logmaxline   int
+		ident        string
+		threads      string
+		daemon       bool
+		help         bool
+		respawn      bool
+		respawndelay int
+	}
 	// Opts
 	opts.SetVersion("Go lang package preinit, version \"%s\"", "0.0.1")
 	opts.SetDescription(`Provides utils for go daemon programing.
 such as daemonize, proc respawn, drop privileges of proc, pass FDs to child proc.`)
 
-	opts.SetOption("--chroot", "", "(available for root only)set proc chroot directory, proc will chroot befor do any thing, default: no chroot")
-	opts.SetOption("--user", "www-data", "(available for root only)set dispatcher/worker running user name or user id, empty to run as current user")
-	opts.SetOption("--group", "www-data", "(available for root only)set dispatcher/worker running group name or group id, empty to run as group of --user")
-	opts.SetOption("--rootdir", "", "set proc working directory, by default, log/ var/ run/ tmp/ base on this directory, default: current directory")
-	opts.SetOption("--vardir", "", "set proc var directory, default: --rootdir + /var/")
-	opts.SetOption("--rundir", "", "set proc run directory, default: --rootdir + /run/")
-	opts.SetOption("--tmpdir", "", "set proc data directory, default: --rootdir + /tmp/")
-	opts.SetOption("--datadir", "", "set proc data directory, default: --rootdir + /data/")
-	opts.SetOption("--logdir", "", "set proc log directory, default: --rootdir + /log/")
-	opts.SetOption("--errlogfile", "", "set proc error log filename, if path is not absolute, file will be --logdir + logfile, default: disable error logging")
-	opts.SetOption("--applogfile", "", "set proc app log file name, if path is not absolute, file will be --logdir + logfile, default: disable app logging")
-	opts.SetOption("--debuglogfile", "", "set proc debug log file name, if path is not absolute, file will be --logdir + logfile, default: disable debug logging")
-	opts.SetOption("--logrotation", "10", "set proc logging rotation, existed logfile will be overwrited")
-	opts.SetOption("--logmaxsize", "0", "set proc max logfile size, K/M/G suffix is identifyed, zero to disable file size rotation")
-	opts.SetOption("--logmaxline", "0", "set proc max logfile line, K/M/G suffix is identifyed, zero to disable file line rotation")
+	opts.SetOption("--pr-chroot", "", "(available for root only)set proc chroot directory, proc will chroot befor do any thing, default: no chroot")
+	opts.SetOption("--pr-user", "www-data", "(available for root only)set dispatcher/worker running user name or user id, empty to run as current user")
+	opts.SetOption("--pr-group", "www-data", "(available for root only)set dispatcher/worker running group name or group id, empty to run as group of --user")
+	opts.SetOption("--pr-rootdir", "", "set proc working directory, by default, log/ var/ run/ tmp/ base on this directory, default: current directory")
+	opts.SetOption("--pr-vardir", "", "set proc var directory, default: --rootdir + /var/")
+	opts.SetOption("--pr-rundir", "", "set proc run directory, default: --rootdir + /run/")
+	opts.SetOption("--pr-tmpdir", "", "set proc data directory, default: --rootdir + /tmp/")
+	opts.SetOption("--pr-datadir", "", "set proc data directory, default: --rootdir + /data/")
+	opts.SetOption("--pr-logdir", "", "set proc log directory, default: --rootdir + /log/")
+	opts.SetOption("--pr-errlogfile", "", "set proc error log filename, if path is not absolute, file will be --logdir + logfile, default: disable error logging")
+	opts.SetOption("--pr-applogfile", "", "set proc app log file name, if path is not absolute, file will be --logdir + logfile, default: disable app logging")
+	opts.SetOption("--pr-debuglogfile", "", "set proc debug log file name, if path is not absolute, file will be --logdir + logfile, default: disable debug logging")
+	opts.SetOption("--pr-logrotation", "10", "set proc logging rotation, existed logfile will be overwrited")
+	opts.SetOption("--pr-logmaxsize", "2G", "set proc max logfile size, K/M/G suffix is identifyed, zero to disable file size rotation")
+	opts.SetOption("--pr-logmaxline", "2G", "set proc max logfile line, K/M/G suffix is identifyed, zero to disable file line rotation")
 
-	opts.SetOption("--ident", "", "set prefix to proctitle, new title will be ident: orig-title, default: disable title prefix")
-	opts.SetOption("--threads", "0", "set max running thread(GOMAXPROCS), -1 for all number of CPUs, 0 for CPUs - 1(at less 1)")
+	opts.SetOption("--pr-ident", "", "set prefix to proctitle, new title will be ident: orig-title, default: disable title prefix")
+	opts.SetOption("--pr-threads", "0", "set max running thread(GOMAXPROCS), -1 for all number of CPUs, 0 for CPUs - 1(at less 1)")
 
-	opts.SetFlag("--daemon", "run proc as daemon")
-	opts.SetFlag("--norespawn", "disable respawning for dispatcher/worker")
-	opts.SetOption("--respawndelay", "5", "delay seconds befor respawn dispatcher/worker, at less one second")
-	opts.SetOption("--respawnmax", "0", "max time of respawn dispatcher/worker, zero for always respawn")
-	opts.SetOption("--forkstate", "", "state of proc fork, default: parent")
-	opts.SetOption("--listens", "", "pre-listen list for dispatcher/worker, format: [proto:][addr/nic:]port/path, default proto is tcp, proto raw for rawsocket, default addr is any, multi-listen split by ',', eg,. :8080,udp:eth0:53,raw:eth1,unix:/tmp/socket.pipe, default: no pre-listen")
-	opts.SetOption("--fds", "0", "number of pre-listen FDs pass from parent to dispatcher/worker")
+	opts.SetFlag("--pr-daemon", "run proc as daemon")
+	opts.SetFlag("--pr-help", "show help of preinit options")
+
+	opts.SetOption("--pr-respawn", "true", "respawning for dispatcher/worker, default: true")
+	opts.SetOption("--pr-respawndelay", "5", "delay seconds befor respawn dispatcher/worker, at less one second")
+	opts.SetOption("--pr-respawnmax", "0", "max time of respawn dispatcher/worker, zero for always respawn")
+	opts.SetOption("--pr-forkstate", "", "state of proc fork, default: parent")
+	opts.SetOption("--pr-listens", "", "pre-listen list for dispatcher/worker, format: [proto:][addr/nic:]port/path, default proto is tcp, proto raw for rawsocket, default addr is any, multi-listen split by ',', eg,. :8080,udp:eth0:53,raw:eth1,unix:/tmp/socket.pipe, default: no pre-listen")
+	opts.SetOption("--pr-fds", "0", "number of pre-listen FDs pass from parent to dispatcher/worker")
 	opts.SetNotes("this is internal command line args to contorl Go lang proc")
 	//
 	//println("opts.init() end.")

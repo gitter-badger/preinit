@@ -19,109 +19,14 @@
 . no error by invalid value
 */
 
-// SetProcTitle
-
-/*
-nginx SetProcTitle:
-
-root      1861  0.0  0.0  90220  1492 ?        Ss   Oct20   0:00 nginx: master process /usr/sbin/nginx -c /etc/nginx/nginx.conf
-www-data  1862  0.0  0.0  90500  2312 ?        S    Oct20   0:00 nginx: worker process
-www-data  1863  0.0  0.0  90500  2056 ?        S    Oct20   0:07 nginx: worker process
-www-data  1864  0.0  0.0  90500  2056 ?        S    Oct20   0:07 nginx: worker process
-www-data  1866  0.0  0.0  90500  2056 ?        S    Oct20   0:07 nginx: worker process
-
-*/
-
 package options
-
-/*
-
-#include "setproctitle.h"
-
-*/
-import "C"
-
-// C.spt_init1 defined in setproctitle.h
 
 import (
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
-	"unsafe"
 )
-
-const (
-	// These values must match the return values for spt_init1() used in C.
-	HaveNone        = 0
-	HaveNative      = 1
-	HaveReplacement = 2
-)
-
-var (
-	HaveSetProcTitle int
-)
-
-var OrigProcTitle string
-
-// default opt Parser
-var Opts *OptParser_t
-
-func setproctitle_init() {
-	Opts = NewOptParser(os.Args[1:])
-	if len(OrigProcTitle) == 0 {
-		OrigProcTitle = CleanArgLine(os.Args[0] + " " + Opts.String())
-	}
-	HaveSetProcTitle = int(C.spt_init1())
-
-	if HaveSetProcTitle == HaveReplacement {
-		newArgs := make([]string, len(os.Args))
-		for i, s := range os.Args {
-			// Use cgo to force go to make copies of the strings.
-			cs := C.CString(s)
-			newArgs[i] = C.GoString(cs)
-			C.free(unsafe.Pointer(cs))
-		}
-		os.Args = newArgs
-
-		env := os.Environ()
-		for _, kv := range env {
-			skv := strings.SplitN(kv, "=", 2)
-			os.Setenv(skv[0], skv[1])
-		}
-
-		argc := C.int(len(os.Args))
-		arg0 := C.CString(os.Args[0])
-		defer C.free(unsafe.Pointer(arg0))
-
-		C.spt_init2(argc, arg0)
-
-		// Restore the original title.
-		SetProcTitle(os.Args[0])
-	}
-}
-
-func SetProcTitle(title string) {
-	cs := C.CString(title)
-	defer C.free(unsafe.Pointer(cs))
-	C.spt_setproctitle(cs)
-}
-
-func SetProcTitlePrefix(prefix string) {
-	title := prefix + OrigProcTitle
-	cs := C.CString(title)
-	defer C.free(unsafe.Pointer(cs))
-	C.spt_setproctitle(cs)
-}
-
-func SetProcTitleSuffix(prefix string) {
-	title := OrigProcTitle + prefix
-	cs := C.CString(title)
-	defer C.free(unsafe.Pointer(cs))
-	C.spt_setproctitle(cs)
-}
-
-// end of SetProcTitle
 
 // argsIndex return index of flag in args, if no found return -1
 func argsIndex(args []string, flag string) int {
@@ -902,8 +807,179 @@ func (op *OptParser_t) SetParserFlag(key, value string) {
 }
 
 //
-func init() {
-	setproctitle_init()
+
+// wrapper of options.CmdString()
+func CmdString() string {
+	return opts.CmdString()
+}
+
+// wrapper of options.func
+func ArgsString() string {
+	return opts.ArgsString()
+}
+
+// wrapper of options.func
+func SetVersion(format string, a ...interface{}) string {
+	return opts.SetVersion(format, a...)
+}
+
+// wrapper of options.func
+func SetDescription(format string, a ...interface{}) string {
+	return opts.SetDescription(format, a...)
+}
+
+// wrapper of options.func
+func SetNotes(format string, a ...interface{}) string {
+	return opts.SetNotes(format, a...)
+}
+
+// Powered set powered string of usage
+// empty val to return current string
+func Powered(val string) string {
+	return opts.Powered(val)
+}
+
+// wrapper of options.func
+func SetOption(long string, defstring string, format string, a ...interface{}) string {
+	return opts.SetOption(long, defstring, format, a...)
+}
+
+// wrapper of options.func
+func SetOptions(long string, defval []string, format string, a ...interface{}) string {
+	return opts.SetOptions(long, defval, format, a...)
+}
+
+// wrapper of options.func
+func SetFlag(long string, format string, a ...interface{}) string {
+	return opts.SetFlag(long, format, a...)
+}
+
+// wrapper of options.func
+func SetNoFlags(defval []string, format string, a ...interface{}) string {
+	return opts.SetNoFlags(defval, format, a...)
+}
+
+// wrapper of options.func
+func VersionString() string {
+	return opts.VersionString()
+}
+
+// wrapper of options.func
+func DescriptionString() string {
+	return opts.DescriptionString()
+}
+
+// wrapper of options.func
+func NoteString() string {
+	return opts.NoteString()
+}
+
+// wrapper of options.func
+func OptionString() string {
+	return opts.OptionString()
+}
+
+// wrapper of options.func
+func FlagString() string {
+	return opts.FlagString()
+}
+
+// wrapper of options.func
+func NoFlagString() string {
+	return opts.NoFlagString()
+}
+
+// wrapper of options.func
+func CommandString() string {
+	return opts.CommandString()
+}
+
+// wrapper of options.func
+func UsageString() string {
+	return opts.UsageString()
+}
+
+// wrapper of options.func
+func Usage() {
+	// TODO: show only user defined option when command line without --preinit
+	// split use opt from --preinit opt
+	// use --pre prefix for all pre option
+	opts.Usage()
+}
+
+// wrapper of opts.Parse
+func Parse(args []string) {
+	opts.Parse(args)
+}
+
+// wrapper of opts.ParseString
+func ParseString(line string) {
+	opts.ParseString(line)
+}
+
+// wrapper of options.func
+func GetParserNoFlags() []string {
+	return opts.GetParserNoFlags()
+}
+
+// wrapper of options.func
+func GetParserNoFlagString() string {
+	return opts.GetParserNoFlagString()
+}
+
+// wrapper of options.func
+func GetNoFlags() []string {
+	return opts.GetNoFlags()
+}
+
+// wrapper of options.func
+func GetNoFlagString() string {
+	return opts.GetNoFlagString()
+}
+
+// wrapper of options.func
+func GetStringList(flag string) []string {
+	return opts.GetStringList(flag)
+}
+
+// wrapper of options.func
+func GetString(flag string) string {
+	return opts.GetString(flag)
+}
+
+// wrapper of options.func
+func GetStrings(flag string) string {
+	return opts.GetStrings(flag)
+}
+
+// wrapper of options.func
+func GetInt(flag string) int {
+	return opts.GetInt(flag)
+}
+
+// wrapper of options.func
+func GetInts(flag string) []int {
+	return opts.GetInts(flag)
+}
+
+// wrapper of options.func
+func GetBool(flag string) bool {
+	return opts.GetBool(flag)
+}
+
+// wrapper of options.func
+func GetFlag(flag string) bool {
+	return opts.GetFlag(flag)
+}
+
+// wrapper of options.func
+func DelParserFlag(key, value string) {
+	opts.DelParserFlag(key, value)
+}
+
+// wrapper of options.func
+func SetParserFlag(key, value string) {
+	opts.SetParserFlag(key, value)
 }
 
 //

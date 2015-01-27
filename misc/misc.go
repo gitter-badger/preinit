@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,6 +20,145 @@ import (
 	"syscall"
 	"time"
 )
+
+// misc functions
+
+// http://godoc.org/github.com/sluu99/uuid fromstr
+
+// TimeFormatNext find next time.Time of format
+// if from == time.Time{}, from = time.Now()
+// return next time.Time or time.Time{} for no next avaible
+func TimeFormatNext(format string, from time.Time) time.Time {
+	var nextT time.Time
+	if format == "" {
+		return nextT
+	}
+	// Mon Jan 2 15:04:05 -0700 MST 2006
+	// 2006-01-02-15-04-MST
+	/*
+		"Nanosecond",
+		"Microsecond",
+		"Millisecond",
+		"Second",
+		"Minute",
+		"Hour",
+		"Day",
+		"Week",
+		"Month1",
+		"Month2",
+		"Month3",
+		"Month4",
+		"year1",
+		"year2",
+	*/
+	//
+	timeSteps := []time.Duration{
+		time.Nanosecond,
+		time.Microsecond,
+		time.Millisecond,
+		time.Second,
+		time.Minute,
+		time.Hour,
+		time.Hour * 24,
+		time.Hour * 24 * 7,
+		time.Hour * 24 * 28,
+		time.Hour * 24 * 29,
+		time.Hour * 24 * 30,
+		time.Hour * 24 * 31,
+		time.Hour * 24 * 365,
+		time.Hour * 24 * 366,
+	}
+	if from.Equal(time.Time{}) {
+		from = time.Now()
+	}
+	// cut to current format ts
+	nowts, err := time.Parse(format, from.Format(format))
+	//fmt.Printf("FORMAT: %v, FROM: %v || %v, CUT: %v || %v\n", format, from.Format(format), from, nowts.Format(format), nowts)
+	if err != nil {
+		// invalid format
+		//fmt.Fprintf(os.Stderr, "TimeFormatNext: invalid format: %s\n", format)
+		return nextT
+	}
+	nowstr := nowts.Format(format)
+	for _, val := range timeSteps {
+		nextT = nowts.Add(val)
+		if nowstr != nextT.Format(format) {
+			return nextT
+		}
+	}
+	return nextT
+}
+
+// GetOpenListOfPid return opened file list of pid
+// return empty map if no file opened
+func GetOpenListOfPid(pid int) []*os.File {
+	var err error
+	var file *os.File
+	var filelist []string
+
+	fds := make([]*os.File, 0, 0)
+
+	file, err = os.Open("/proc/" + strconv.Itoa(pid) + "/fd/")
+	if err != nil {
+		Logger.Errlogf("ERROR: %s\n", err)
+		return fds
+	}
+	defer file.Close()
+
+	filelist, err = file.Readdirnames(1024)
+	if err != nil {
+		if err == io.EOF {
+			Logger.Errlogf("read dir end: %s, %v\n", err, filelist)
+		} else {
+			Logger.Errlogf("ERROR: %s\n", err)
+			return fds
+		}
+	}
+	/*
+		ls -l /proc/self/fd/
+		total 0
+		lrwx------ 1 rhinofly rhinofly 64 Nov  4 09:47 0 -> /dev/pts/16
+		lrwx------ 1 rhinofly rhinofly 64 Nov  4 09:47 1 -> /dev/pts/16
+		lrwx------ 1 rhinofly rhinofly 64 Nov  4 09:47 2 -> /dev/pts/16
+		lr-x------ 1 rhinofly rhinofly 64 Nov  4 09:47 3 -> /proc/29484/fd
+	*/
+	tmpid := strconv.Itoa(int(file.Fd()))
+	if len(filelist) > 0 {
+		for idx := range filelist {
+			//func NewFile(fd uintptr, name string) *File
+			link, _ := os.Readlink("/proc/" + strconv.Itoa(pid) + "/fd/" + filelist[idx])
+			if filelist[idx] == tmpid {
+				//Logger.Errlogf("file in %d dir: %d, %v, link %s, is me %v\n", pid, idx, filelist[idx], link, file.Name())
+				continue
+			}
+			//Logger.Errlogf("file in %d dir: %d, %v -> %s\n", pid, idx, filelist[idx], link)
+			fd, err := strconv.Atoi(filelist[idx])
+			if err != nil {
+				Logger.Errlogf("strconv.Atoi(%v): %s\n", filelist[idx], err)
+				continue
+			}
+			fds = append(fds, os.NewFile(uintptr(fd), link))
+		}
+	}
+	return fds
+}
+
+// base command line args process
+
+// SafeFileName replace invalid char with _
+// valid char is . 0-9 _ - A-Z a-Z /
+func SafeFileName(name string) string {
+	name = filepath.Clean(name)
+	newname := make([]byte, 0, len(name))
+	for _, val := range name {
+		if (val >= '0' && val <= '9') || (val >= 'A' && val <= 'Z') || (val >= 'a' && val <= 'z') || val == '_' || val == '-' || val == '/' {
+			newname = append(newname, byte(val))
+		} else {
+			newname = append(newname, '_')
+		}
+	}
+	return string(newname)
+}
 
 // ip <=> long
 func Ip2long(ipstr string) (ip uint32) {

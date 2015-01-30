@@ -25,11 +25,6 @@ import (
 	"github.com/wheelcomplex/preinit/options"
 )
 
-// default opt Parser
-// default opt Parser
-// do not include ExecFile
-var opts = options.NewOptParser(os.Args[1:])
-
 // SetGoMaxCPUs set runtime.GOMAXPROCS, -1 for use all cpus, 0 for use cpus - 1, other for use N cpus
 // at less one cpu
 // return final using cpus
@@ -406,10 +401,14 @@ func init() {
 		logmaxline   int
 		ident        string
 		threads      string
-		daemon       bool
-		help         bool
 		respawn      bool
 		respawndelay int
+		respawnmax   int
+		forkstate    string
+		listens      string
+		fds          int
+		daemon       bool
+		help         bool
 	}
 	// Opts
 	opts.SetVersion("Go lang package preinit, version \"%s\"", "0.0.1")
@@ -435,17 +434,19 @@ such as daemonize, proc respawn, drop privileges of proc, pass FDs to child proc
 	opts.SetOption("--pr-ident", "", "set prefix to proctitle, new title will be ident: orig-title, default: disable title prefix")
 	opts.SetOption("--pr-threads", "0", "set max running thread(GOMAXPROCS), -1 for all number of CPUs, 0 for CPUs - 1(at less 1)")
 
-	opts.SetFlag("--pr-daemon", "run proc as daemon")
-	opts.SetFlag("--pr-help", "show help of preinit options")
-
 	opts.SetOption("--pr-respawn", "true", "respawning for dispatcher/worker, default: true")
 	opts.SetOption("--pr-respawndelay", "5", "delay seconds befor respawn dispatcher/worker, at less one second")
 	opts.SetOption("--pr-respawnmax", "0", "max time of respawn dispatcher/worker, zero for always respawn")
 	opts.SetOption("--pr-forkstate", "", "state of proc fork, default: parent")
 	opts.SetOption("--pr-listens", "", "pre-listen list for dispatcher/worker, format: [proto:][addr/nic:]port/path, default proto is tcp, proto raw for rawsocket, default addr is any, multi-listen split by ',', eg,. :8080,udp:eth0:53,raw:eth1,unix:/tmp/socket.pipe, default: no pre-listen")
 	opts.SetOption("--pr-fds", "0", "number of pre-listen FDs pass from parent to dispatcher/worker")
+
+	opts.SetFlag("--pr-daemon", "run proc as daemon")
+	opts.SetFlag("--pr-help", "show help of preinit options")
+
 	opts.SetNotes("this is internal command line args to contorl Go lang proc")
 	//
+	// TODO: here
 	//println("opts.init() end.")
 
 	/*

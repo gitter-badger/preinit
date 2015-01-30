@@ -19,24 +19,25 @@ func TimePrintf(format string, v ...interface{}) {
 }
 
 func main() {
+	mode := flag.String("m", "server", "run mode")
 	rbufsize := flag.Int("R", 1, "read buffer size")
 	rtime := flag.Int("T", 65535, "read ttimeout")
 	flag.Parse()
-	laddr, lerr := net.ResolveTCPAddr("tcp", "127.0.0.1:8800")
-	if lerr != nil {
-		println(lerr.Error())
-		os.Exit(9)
-	}
-	l, lerr := net.ListenTCP("tcp", laddr)
-	if lerr != nil {
-		println(lerr.Error())
-		os.Exit(9)
-	}
-	synch := make(chan struct{}, 1)
-	go func() {
-		synch <- struct{}{}
+	hostport := "127.0.0.1:8800"
+	if *mode == "server" {
+		laddr, lerr := net.ResolveTCPAddr("tcp", hostport)
+		if lerr != nil {
+			println(lerr.Error())
+			os.Exit(9)
+		}
+		l, lerr := net.ListenTCP("tcp", laddr)
+		if lerr != nil {
+			println(lerr.Error())
+			os.Exit(9)
+		}
 		conn, _ := l.AcceptTCP() // *net.TCPConn
-		fmt.Printf("new conn %s\n", conn.RemoteAddr().String())
+		fmt.Printf("[%d]new conn %s\n", os.Getpid(), conn.RemoteAddr().String())
+		conn.SetWriteBuffer(5)
 		buf := []byte("01234567890123456789")
 		for i := 0; i < 10; i++ {
 			_, err := conn.Write(buf[i : i+1])
@@ -49,28 +50,26 @@ func main() {
 		}
 		conn.Close()
 		println("server closed")
-	}()
-	defer l.Close()
-	// wait for listener
-	<-synch
-	hostport := "127.0.0.1:8800"
-	cl, ce := net.Dial("tcp4", hostport)
+		l.Close()
+		return
+	}
+	client, ce := net.Dial("tcp4", hostport)
 	if ce != nil {
 		TimePrintf("ERROR: %s\n", ce.Error())
 		os.Exit(1)
 	}
 	TimePrintf("conected: %s\n", hostport)
 
-	rtimeout := 1e8 * time.Duration(*rtime)
 	println("reading with buffer size:", *rbufsize, "timeout", *rtime)
 	buflen := *rbufsize
 	rbuf := make([]byte, buflen)
 	tbuf := make([]byte, 0, 100*buflen)
 	// read until read timeout
 	// wait one seconds for server closed
-	time.Sleep(1e9)
+	time.Sleep(5e9)
+	cl := client.(*net.TCPConn)
+	cl.SetReadBuffer(1)
 	for {
-		cl.SetReadDeadline(time.Now().Add(rtimeout))
 		nr, re := cl.Read(rbuf)
 		if nr > 0 {
 			tbuf = append(tbuf, rbuf[:nr]...)
@@ -79,9 +78,14 @@ func main() {
 			TimePrintf("ERROR: read %s failed: %s\n", hostport, re.Error())
 			break
 		}
+		time.Sleep(1e8)
 	}
 	if len(tbuf) > 0 {
-		TimePrintf("Got final response %s (%d)\n ------ \n%s\n", hostport, len(tbuf), tbuf)
+		TimePrintf("[%d]Got final response %s (%d)\n ------ \n%s\n", os.Getpid(), hostport, len(tbuf), tbuf)
 		TimePrintf(" ------\n")
 	}
+	cl.Close()
+	return
 }
+
+//

@@ -36,9 +36,9 @@ var (
 var OrigProcTitle string
 
 func setproctitle_init() {
-	Opts = NewOptParser(os.Args[1:])
+	opts = NewOpts(os.Args[1:])
 	if len(OrigProcTitle) == 0 {
-		OrigProcTitle = CleanArgLine(os.Args[0] + " " + Opts.String())
+		OrigProcTitle = CleanArgLine(os.Args[0] + " " + opts.String())
 	}
 	HaveSetProcTitle = int(C.spt_init1())
 
@@ -221,7 +221,7 @@ func (o *option_t) String() string {
 }
 
 // opt paser struct
-type Opts_t struct {
+type opts_t struct {
 	longKeys           []string                        // list of --flag
 	longArr            map[string][]string             // list for '--flag' options
 	noFlagList         []string                        // list for '/path/filename /path/file2 /path/file3'
@@ -231,14 +231,14 @@ type Opts_t struct {
 	powered            string                          // powered string
 }
 
-// NewOptParserString parsed args and return opt paser struct
-func NewOptParserString(line string) *Opts_t {
-	return NewOptParser(lineToArgs(line))
+// NewOptsFromString parsed args and return opt paser struct
+func NewOptsFromString(line string) *opts_t {
+	return NewOpts(lineToArgs(line))
 }
 
-// NewOptParser parsed args and return opt paser struct
-func NewOptParser(args []string) *Opts_t {
-	op := new(Opts_t)
+// NewOpts parsed args and return opt paser struct
+func NewOpts(args []string) *opts_t {
+	op := new(opts_t)
 	op.reset()
 	op.Parse(args)
 	return op
@@ -246,7 +246,7 @@ func NewOptParser(args []string) *Opts_t {
 
 // getOption return one option_t by sestion, flag
 // return nil if no exist
-func (op *Opts_t) getOption(sestion, flag string) *option_t {
+func (op *opts_t) getOption(sestion, flag string) *option_t {
 	if _, ok := op.sestions[sestion]; ok == false {
 		return nil
 	}
@@ -258,7 +258,7 @@ func (op *Opts_t) getOption(sestion, flag string) *option_t {
 
 // setOption setup one option by sestion, short flag, long flag, default values, description text
 // will overwrite old data if exist
-func (op *Opts_t) setOption(sestion, long string, defval []string, format string, a ...interface{}) string {
+func (op *opts_t) setOption(sestion, long string, defval []string, format string, a ...interface{}) string {
 	if sestion == "" {
 		return ""
 	}
@@ -293,40 +293,40 @@ func (op *Opts_t) setOption(sestion, long string, defval []string, format string
 
 // SetVersion set version text for apps
 // version text will show in first line of usage
-func (op *Opts_t) SetVersion(format string, a ...interface{}) string {
+func (op *opts_t) SetVersion(format string, a ...interface{}) string {
 	return op.setOption("__version", "__version", []string{}, format, a...)
 }
 
 // SetDescription set description text for apps
 // description text will show after version
-func (op *Opts_t) SetDescription(format string, a ...interface{}) string {
+func (op *opts_t) SetDescription(format string, a ...interface{}) string {
 	return op.setOption("__desc", "__desc", []string{}, format, a...)
 }
 
 // SetNotes set notes text for apps
 // notes text will show after flags
-func (op *Opts_t) SetNotes(format string, a ...interface{}) string {
+func (op *opts_t) SetNotes(format string, a ...interface{}) string {
 	return op.setOption("__notes", "__notes", []string{}, format, a...)
 }
 
 // SetOption set option(--key value) for apps
-func (op *Opts_t) SetOption(long string, defstring string, format string, a ...interface{}) string {
+func (op *opts_t) SetOption(long string, defstring string, format string, a ...interface{}) string {
 	return op.setOption("options", long, lineToArgs(defstring), format, a...)
 }
 
 // SetOptions set option(--key value) for apps
-func (op *Opts_t) SetOptions(long string, defval []string, format string, a ...interface{}) string {
+func (op *opts_t) SetOptions(long string, defval []string, format string, a ...interface{}) string {
 	return op.setOption("options", long, defval, format, a...)
 }
 
 // SetFlag set flag(--flag) for apps
-func (op *Opts_t) SetFlag(long string, format string, a ...interface{}) string {
+func (op *opts_t) SetFlag(long string, format string, a ...interface{}) string {
 	return op.setOption("flags", long, []string{}, format, a...)
 }
 
 // SetNoFlags set no flags item for apps
 // option key is lists
-func (op *Opts_t) SetNoFlags(defval []string, format string, a ...interface{}) string {
+func (op *opts_t) SetNoFlags(defval []string, format string, a ...interface{}) string {
 	return op.setOption("lists", "__lists", defval, format, a...)
 }
 
@@ -334,7 +334,7 @@ func (op *Opts_t) SetNoFlags(defval []string, format string, a ...interface{}) s
 // sestion text end with \n
 // if sestion no exist return empty
 // if no option inside this sestion return sestion title only(end with \n)
-func (op *Opts_t) sestionString(sestion string) string {
+func (op *opts_t) sestionString(sestion string) string {
 	var text string
 	if _, ok := op.sestions[sestion]; ok == false {
 		return text
@@ -366,17 +366,17 @@ func (op *Opts_t) sestionString(sestion string) string {
 ///// __version, __desc, options, flags, lists, __notes
 
 // VersionString return version text in string
-func (op *Opts_t) VersionString() string {
+func (op *opts_t) VersionString() string {
 	return op.sestionString("__version")
 }
 
 // DescriptionString return description text in string
-func (op *Opts_t) DescriptionString() string {
+func (op *opts_t) DescriptionString() string {
 	return op.sestionString("__desc")
 }
 
 // NoteString return notes text in string
-func (op *Opts_t) NoteString() string {
+func (op *opts_t) NoteString() string {
 	if op.powered == "" {
 		return op.sestionString("__notes")
 	} else {
@@ -385,22 +385,22 @@ func (op *Opts_t) NoteString() string {
 }
 
 // OptionString return options text in string
-func (op *Opts_t) OptionString() string {
+func (op *opts_t) OptionString() string {
 	return op.sestionString("options")
 }
 
 // FlagString return flags text in string
-func (op *Opts_t) FlagString() string {
+func (op *opts_t) FlagString() string {
 	return op.sestionString("flags")
 }
 
 // NoFlagString return noFlags text in string
-func (op *Opts_t) NoFlagString() string {
+func (op *opts_t) NoFlagString() string {
 	return op.sestionString("lists")
 }
 
 // CommandString return command line template in string
-func (op *Opts_t) CommandString() string {
+func (op *opts_t) CommandString() string {
 	longopt := ""
 	if _, ok := op.sestions["options"]; ok {
 		for idx, _ := range op.sestions["options"] {
@@ -433,18 +433,18 @@ func (op *Opts_t) CommandString() string {
 }
 
 // UsageString return usage text in string
-func (op *Opts_t) UsageString() string {
+func (op *opts_t) UsageString() string {
 	return strings.Trim(op.VersionString()+"\n"+op.DescriptionString()+"\nUSAGE:\n"+op.CommandString()+op.OptionString()+op.FlagString()+op.NoFlagString()+op.NoteString(), "\n") + "\n"
 }
 
 // Usage output usage text to stderr
-func (op *Opts_t) Usage() {
+func (op *opts_t) Usage() {
 	fmt.Fprintf(os.Stderr, "%s", op.UsageString())
 }
 
 // parserReset parser for reuses
 // old value discardeds
-func (op *Opts_t) parserReset() {
+func (op *opts_t) parserReset() {
 	op.longKeys = make([]string, 0, 0)
 	op.longArr = make(map[string][]string)
 	op.noFlagList = make([]string, 0, 0)
@@ -452,7 +452,7 @@ func (op *Opts_t) parserReset() {
 
 // reset parser for reuses
 // old value discardeds
-func (op *Opts_t) reset() {
+func (op *opts_t) reset() {
 	op.parserReset()
 	op.sestions = make(map[string]map[string]*option_t)
 	op.sestions["options"] = make(map[string]*option_t)
@@ -464,7 +464,7 @@ func (op *Opts_t) reset() {
 
 // Powered set powered string of usage
 // empty val to return current string
-func (op *Opts_t) Powered(val string) string {
+func (op *opts_t) Powered(val string) string {
 	old := op.powered
 	if val != "" {
 		op.powered = val
@@ -473,7 +473,7 @@ func (op *Opts_t) Powered(val string) string {
 }
 
 // String convert opt paser struct to strings, include default values
-func (op *Opts_t) String() string {
+func (op *opts_t) String() string {
 	var shortflag, shortoption, longflag, longoption string
 	passed := make(map[string]struct{})
 	// default flags/options
@@ -570,12 +570,12 @@ func (op *Opts_t) String() string {
 }
 
 // CmdString convert opt paser struct to strings, include default values
-func (op *Opts_t) CmdString() string {
+func (op *opts_t) CmdString() string {
 	return op.String()
 }
 
 // ArgsString convert opt paser struct to strings, do not include default values
-func (op *Opts_t) ArgsString() string {
+func (op *opts_t) ArgsString() string {
 	var shortflag, shortoption, longflag, longoption string
 	for _, k1 := range op.longKeys {
 		// for short flag
@@ -609,12 +609,12 @@ func (op *Opts_t) ArgsString() string {
 }
 
 // ParseString get opt paser struct ready to use
-func (op *Opts_t) ParseString(line string) {
+func (op *opts_t) ParseString(line string) {
 	op.Parse(lineToArgs(line))
 }
 
 // ParseMap get opt paser struct ready to use
-func (op *Opts_t) Parse(args []string) {
+func (op *opts_t) Parse(args []string) {
 	// reset
 	op.parserReset()
 	tmpList := make([]string, 0, len(args)+1)
@@ -667,17 +667,17 @@ func (op *Opts_t) Parse(args []string) {
 }
 
 // GetParserNoFlags return no-flag list in []string
-func (op *Opts_t) GetParserNoFlags() []string {
+func (op *opts_t) GetParserNoFlags() []string {
 	return op.noFlagList
 }
 
 // GetParserNoFlags return no-flag list in string
-func (op *Opts_t) GetParserNoFlagString() string {
+func (op *opts_t) GetParserNoFlagString() string {
 	return ArgsToSpLine(op.GetParserNoFlags())
 }
 
 // getString return first value of this keys
-func (op *Opts_t) getString(key string) string {
+func (op *opts_t) getString(key string) string {
 	if key == "" {
 		return ""
 	}
@@ -690,7 +690,7 @@ func (op *Opts_t) getString(key string) string {
 
 // getStringList return list value of this keys
 // if no exist, return empty []string
-func (op *Opts_t) getStringList(key string) []string {
+func (op *opts_t) getStringList(key string) []string {
 	if key == "" {
 		return make([]string, 0, 0)
 	}
@@ -705,7 +705,7 @@ func (op *Opts_t) getStringList(key string) []string {
 
 // GetNoFlags return no flag list in []string
 // if option no exist, return defval(if no default defined return nil)
-func (op *Opts_t) GetNoFlags() []string {
+func (op *opts_t) GetNoFlags() []string {
 	val := op.GetParserNoFlags()
 	if len(val) == 0 {
 		// try defaut value
@@ -718,13 +718,13 @@ func (op *Opts_t) GetNoFlags() []string {
 
 // GetNoFlagString return no flag list in string
 // if option no exist, return defval(if no default defined return nil)
-func (op *Opts_t) GetNoFlagString() string {
+func (op *opts_t) GetNoFlagString() string {
 	return ArgsToSpLine(op.GetNoFlags())
 }
 
 // GetStringList return list value of option
 // if option no exist, return defval(if no default defined return empty list)
-func (op *Opts_t) GetStringList(flag string) []string {
+func (op *opts_t) GetStringList(flag string) []string {
 	val := op.getStringList(flag)
 	if len(val) == 0 {
 		// try defaut value
@@ -739,7 +739,7 @@ func (op *Opts_t) GetStringList(flag string) []string {
 
 // GetString return first value of option
 // if option no exist, return defval(if no default defined return empty)
-func (op *Opts_t) GetString(flag string) string {
+func (op *opts_t) GetString(flag string) string {
 	if list := op.GetStringList(flag); len(list) > 0 {
 		return list[0]
 	}
@@ -748,7 +748,7 @@ func (op *Opts_t) GetString(flag string) string {
 
 // GetStrings return all value of option
 // if option no exist, return defval(if no default defined return empty)
-func (op *Opts_t) GetStrings(flag string) string {
+func (op *opts_t) GetStrings(flag string) string {
 	return argsToList(op.GetStringList(flag))
 }
 
@@ -756,7 +756,7 @@ func (op *Opts_t) GetStrings(flag string) string {
 
 // GetInt return first value of option
 // if option no exist, return defval(if no default defined return -1)
-func (op *Opts_t) GetInt(flag string) int {
+func (op *opts_t) GetInt(flag string) int {
 	if list := op.GetStringList(flag); len(list) > 0 {
 		ival, err := strconv.Atoi(list[0])
 		if err != nil {
@@ -769,7 +769,7 @@ func (op *Opts_t) GetInt(flag string) int {
 
 // GetInts return all value of option
 // if option no exist, return defval(if no default defined return empty []int)
-func (op *Opts_t) GetInts(flag string) []int {
+func (op *opts_t) GetInts(flag string) []int {
 	ilist := make([]int, 0, 0)
 	if list := op.GetStringList(flag); len(list) > 0 {
 		for idx, _ := range list {
@@ -786,26 +786,21 @@ func (op *Opts_t) GetInts(flag string) []int {
 
 // GetBool return true if option exist, otherwise return false
 // if option no exist, return defval(if no default defined return -1)
-func (op *Opts_t) GetBool(flag string) bool {
+func (op *opts_t) GetBool(flag string) bool {
 	if list := op.GetStringList(flag); len(list) > 0 {
 		return true
 	}
 	return false
 }
 
-// GetFlag is alias of GetBool
-func (op *Opts_t) GetFlag(flag string) bool {
-	return op.GetBool(flag)
-}
+//// modify options of opts_t
 
-//// modify options of Opts_t
-
-// DelParserFlag modify Opts_t to match commandLine removed "key value"
+// DelCmdFlag modify opts_t to match commandLine removed "key value"
 // if key is flag, value == "" will remove all value of key, otherwise remove only flag match "key value"
-func (op *Opts_t) DelParserFlag(key, value string) {
-	newop := NewOptParserString(op.String())
-	delop := NewOptParserString(CleanArgLine(key) + " " + CleanArgLine(value))
-	//println("DelParserFlag In", key, "||", value, "||", "=>", CleanArgLine(key)+" "+CleanArgLine(value), "||", newop.String())
+func (op *opts_t) DelCmdFlag(key, value string) {
+	newop := NewOptsFromString(op.String())
+	delop := NewOptsFromString(CleanArgLine(key) + " " + CleanArgLine(value))
+	//println("DelCmdFlag In", key, "||", value, "||", "=>", CleanArgLine(key)+" "+CleanArgLine(value), "||", newop.String())
 	op.parserReset()
 	// sync short flags
 	var match bool
@@ -842,16 +837,16 @@ func (op *Opts_t) DelParserFlag(key, value string) {
 		}
 		op.noFlagList = append(op.noFlagList, val)
 	}
-	//println("DelParserFlag Out", key, "||", value, "||", op.String())
+	//println("DelCmdFlag Out", key, "||", value, "||", op.String())
 }
 
-// SetParserFlag modify Opts_t to match commandLine "key value"
+// SetCmdFlag modify opts_t to match commandLine "key value"
 // empty string will be ignored
-// string will be trimmed befor save to Opts_t
+// string will be trimmed befor save to opts_t
 // if key is flag(start with - or --) old value of this flag will be overwrited
-func (op *Opts_t) SetParserFlag(key, value string) {
-	newop := NewOptParserString(CleanArgLine(key) + " " + CleanArgLine(value))
-	//println("SetParserFlagIn", key, "||", value, "||", "=>", CleanArgLine(key)+" "+CleanArgLine(value), "||", newop.String())
+func (op *opts_t) SetCmdFlag(key, value string) {
+	newop := NewOptsFromString(CleanArgLine(key) + " " + CleanArgLine(value))
+	//println("SetCmdFlagIn", key, "||", value, "||", "=>", CleanArgLine(key)+" "+CleanArgLine(value), "||", newop.String())
 	// sync long flags
 	for _, k1 := range newop.longKeys {
 		if argsIndex(op.longKeys, k1) == -1 {
@@ -866,7 +861,7 @@ func (op *Opts_t) SetParserFlag(key, value string) {
 	}
 	// sync standalone value
 	op.noFlagList = append(op.noFlagList, newop.noFlagList...)
-	//println("SetParserFlagOut", key, "||", value, "||", op.String())
+	//println("SetCmdFlagOut", key, "||", value, "||", op.String())
 }
 
 //
@@ -874,7 +869,7 @@ func (op *Opts_t) SetParserFlag(key, value string) {
 // default opt Parser
 // default opt Parser
 // do not include ExecFile
-var opts = NewOptParser(os.Args[1:])
+var opts = NewOpts(os.Args[1:])
 
 // wrapper of options.CmdString()
 func CmdString() string {
@@ -969,9 +964,6 @@ func UsageString() string {
 
 // wrapper of options.func
 func Usage() {
-	// TODO: show only user defined option when command line without --preinit
-	// split use opt from --preinit opt
-	// use --pre prefix for all pre option
 	opts.Usage()
 }
 
@@ -1036,18 +1028,13 @@ func GetBool(flag string) bool {
 }
 
 // wrapper of options.func
-func GetFlag(flag string) bool {
-	return opts.GetFlag(flag)
+func DelCmdFlag(key, value string) {
+	opts.DelCmdFlag(key, value)
 }
 
 // wrapper of options.func
-func DelParserFlag(key, value string) {
-	opts.DelParserFlag(key, value)
-}
-
-// wrapper of options.func
-func SetParserFlag(key, value string) {
-	opts.SetParserFlag(key, value)
+func SetCmdFlag(key, value string) {
+	opts.SetCmdFlag(key, value)
 }
 
 //

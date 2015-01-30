@@ -71,7 +71,7 @@ var ExecFile string
 // default opt Parser
 // default opt Parser
 // do not include ExecFile
-var opts = options.NewOptParser(os.Args[1:])
+var opts = options.NewOpts(os.Args[1:])
 
 // initial default command line parser
 func argsInit() {

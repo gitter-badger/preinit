@@ -21,8 +21,9 @@ func poolNewFun(size int) func() interface{} {
 	}
 }
 
-//
-func newAlloc(step int) *allocPool {
+// NewAlloc return new allocPool
+// hight QPS apps should use multi allocPool avoiding sync.Pool locking
+func NewAlloc(step int) *allocPool {
 	if step <= ALLOC_BASE {
 		step = ALLOC_BASE
 	}
@@ -79,12 +80,7 @@ func (ap *allocPool) Put(buf []byte) {
 }
 
 //
-var pool = newAlloc(ALLOC_BASE)
-
-//
-func NewAlloc(size int) *allocPool {
-	return newAlloc(size)
-}
+var pool = NewAlloc(ALLOC_BASE)
 
 //
 func Get(size int) []byte {

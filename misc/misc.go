@@ -25,6 +25,54 @@ import (
 
 // http://godoc.org/github.com/sluu99/uuid fromstr
 
+// ListToSlice convert map[string]struct{} to []string
+func ListToSlice(list map[string]struct{}) []string {
+	s := make([]string, 0, len(list))
+	for name, _ := range list {
+		s = append(s, name)
+	}
+	return s
+}
+
+// CompareByteString in zero copy
+// return 0 for equal, -1 for p less, 1 for p larger
+func CompareByteString(p []byte, s string) int {
+	pl := len(p)
+	sl := len(s)
+	if pl > sl {
+		return 1
+	}
+	if pl < sl {
+		return -1
+	}
+	for idx := 0; idx < pl; idx++ {
+		if p[idx] != s[idx] {
+			if p[idx] > s[idx] {
+				return 1
+			}
+			if p[idx] < s[idx] {
+				return -1
+			}
+		}
+	}
+	return 0
+}
+
+// SafeFileName replace invalid char with _
+// valid char is . 0-9 _ - A-Z a-Z /
+func SafeFileName(name string) string {
+	name = filepath.Clean(name)
+	newname := make([]byte, 0, len(name))
+	for _, val := range name {
+		if (val >= '0' && val <= '9') || (val >= 'A' && val <= 'Z') || (val >= 'a' && val <= 'z') || val == '_' || val == '-' || val == '/' || val == '.' {
+			newname = append(newname, byte(val))
+		} else {
+			newname = append(newname, '_')
+		}
+	}
+	return string(newname)
+}
+
 // utils for package getopt
 
 // ArgsIndex return index of flag in args, if no found return -1
@@ -230,21 +278,6 @@ func GetOpenListOfPid(pid int) []*os.File {
 }
 
 // base command line args process
-
-// SafeFileName replace invalid char with _
-// valid char is . 0-9 _ - A-Z a-Z /
-func SafeFileName(name string) string {
-	name = filepath.Clean(name)
-	newname := make([]byte, 0, len(name))
-	for _, val := range name {
-		if (val >= '0' && val <= '9') || (val >= 'A' && val <= 'Z') || (val >= 'a' && val <= 'z') || val == '_' || val == '-' || val == '/' {
-			newname = append(newname, byte(val))
-		} else {
-			newname = append(newname, '_')
-		}
-	}
-	return string(newname)
-}
 
 // ip <=> long
 func Ip2long(ipstr string) (ip uint32) {

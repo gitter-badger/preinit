@@ -25,6 +25,92 @@ import (
 
 // http://godoc.org/github.com/sluu99/uuid fromstr
 
+// utils for package getopt
+
+// ArgsIndex return index of flag in args, if no found return -1
+func ArgsIndex(args []string, flag string) int {
+	var index int = -1
+	for idx, val := range args {
+		if val == flag {
+			index = idx
+			break
+		}
+	}
+	return index
+}
+
+// CleanArgLine
+func CleanArgLine(line string) string {
+	var oldline string
+	for {
+		oldline = line
+		line = strings.Replace(line, "  ", " ", -1)
+		if oldline == line {
+			break
+		}
+	}
+	return strings.Trim(line, ", ")
+}
+
+// CleanSplitLine
+func CleanSplitLine(line string) string {
+	var oldline string
+	for {
+		oldline = line
+		line = strings.Replace(line, "  ", " ", -1)
+		if oldline == line {
+			break
+		}
+	}
+	for {
+		oldline = line
+		line = strings.Replace(line, " ", ",", -1)
+		if oldline == line {
+			break
+		}
+	}
+	for {
+		oldline = line
+		line = strings.Replace(line, ",,", ",", -1)
+		if oldline == line {
+			break
+		}
+	}
+	return strings.Trim(line, ", ")
+}
+
+// ExecFileOfPid return absolute execute file path of running pid
+// return empty for error
+// support linux only
+func ExecFileOfPid(pid int) string {
+	file, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
+	if err != nil {
+		return ""
+	}
+	return file
+}
+
+// StringListToSpaceLine convert []string to string line, split by space
+func StringListToSpaceLine(list []string) string {
+	tmpArr := make([]string, 0, len(list))
+	for _, val := range list {
+		val = CleanArgLine(val)
+		// val = strings.Replace(val, " ", ",", -1)
+		tmpArr = append(tmpArr, val)
+	}
+	return strings.Trim(strings.Join(tmpArr, " "), ", ")
+}
+
+// ArgsToList convert []string to string list, split by ,
+func ArgsToList(list []string) string {
+	return strings.Trim(strings.Join(list, ","), ", ")
+}
+
+// LineToArgs convert string to []string
+func LineToArgs(line string) []string {
+	return strings.Split(CleanSplitLine(line), ",")
+}
+
 // TimeFormatNext find next time.Time of format
 // if from == time.Time{}, from = time.Now()
 // return next time.Time or time.Time{} for no next avaible
@@ -100,7 +186,7 @@ func GetOpenListOfPid(pid int) []*os.File {
 
 	file, err = os.Open("/proc/" + strconv.Itoa(pid) + "/fd/")
 	if err != nil {
-		Logger.Errlogf("ERROR: %s\n", err)
+		//Logger.Errlogf("ERROR: %s\n", err)
 		return fds
 	}
 	defer file.Close()
@@ -108,9 +194,9 @@ func GetOpenListOfPid(pid int) []*os.File {
 	filelist, err = file.Readdirnames(1024)
 	if err != nil {
 		if err == io.EOF {
-			Logger.Errlogf("read dir end: %s, %v\n", err, filelist)
+			//Logger.Errlogf("read dir end: %s, %v\n", err, filelist)
 		} else {
-			Logger.Errlogf("ERROR: %s\n", err)
+			//Logger.Errlogf("ERROR: %s\n", err)
 			return fds
 		}
 	}
@@ -134,7 +220,7 @@ func GetOpenListOfPid(pid int) []*os.File {
 			//Logger.Errlogf("file in %d dir: %d, %v -> %s\n", pid, idx, filelist[idx], link)
 			fd, err := strconv.Atoi(filelist[idx])
 			if err != nil {
-				Logger.Errlogf("strconv.Atoi(%v): %s\n", filelist[idx], err)
+				//Logger.Errlogf("strconv.Atoi(%v): %s\n", filelist[idx], err)
 				continue
 			}
 			fds = append(fds, os.NewFile(uintptr(fd), link))
@@ -475,76 +561,18 @@ func SubString(str string, begin, length int) (substr string) {
 	return string(rs[begin:end])
 }
 
-// TimeFormatNext find next time.Time of format
-// if from == time.Time{}, from = time.Now()
-// return next time.Time or time.Time{} for no next avaible
-func TimeFormatNext(format string, from time.Time) time.Time {
-	var nextT time.Time
-	if format == "" {
-		return nextT
-	}
-	// Mon Jan 2 15:04:05 -0700 MST 2006
-	// 2006-01-02-15-04-MST
-	/*
-		"Nanosecond",
-		"Microsecond",
-		"Millisecond",
-		"Second",
-		"Minute",
-		"Hour",
-		"Day",
-		"Week",
-		"Month1",
-		"Month2",
-		"Month3",
-		"Month4",
-		"year1",
-		"year2",
-	*/
-	//
-	timeSteps := []time.Duration{
-		time.Nanosecond,
-		time.Microsecond,
-		time.Millisecond,
-		time.Second,
-		time.Minute,
-		time.Hour,
-		time.Hour * 24,
-		time.Hour * 24 * 7,
-		time.Hour * 24 * 28,
-		time.Hour * 24 * 29,
-		time.Hour * 24 * 30,
-		time.Hour * 24 * 31,
-		time.Hour * 24 * 365,
-		time.Hour * 24 * 366,
-	}
-	if from.Equal(time.Time{}) {
-		from = time.Now()
-	}
-	// cut to current format ts
-	nowts, err := time.Parse(format, from.Format(format))
-	//fmt.Printf("FORMAT: %v, FROM: %v || %v, CUT: %v || %v\n", format, from.Format(format), from, nowts.Format(format), nowts)
-	if err != nil {
-		// invalid format
-		//fmt.Fprintf(os.Stderr, "TimeFormatNext: invalid format: %s\n", format)
-		return nextT
-	}
-	nowstr := nowts.Format(format)
-	for _, val := range timeSteps {
-		nextT = nowts.Add(val)
-		if nowstr != nextT.Format(format) {
-			return nextT
-		}
-	}
-	return nextT
-}
-
 // Tpf write msg with time suffix to stdout
 func Tpf(format string, v ...interface{}) {
-	println("calling tpf2")
 	ts := fmt.Sprintf("[%s] ", time.Now().String())
 	msg := fmt.Sprintf(format, v...)
 	fmt.Printf("%s%s", ts, msg)
+}
+
+// Tpln write msg with time suffix to stdout
+func Tpln(format string, v ...interface{}) {
+	ts := fmt.Sprintf("[%s] ", time.Now().String())
+	msg := fmt.Sprintf(format, v...)
+	fmt.Printf("%s%s\n", ts, msg)
 }
 
 //
@@ -634,7 +662,7 @@ func (brw *ByteRWCloser) Reset() {
 //			IpAddrList[addrString] = addrString[:pos]
 //		}
 //	} else {
-//		Logger.Stderrf("InterfaceAddrs: %v", err)
+//		//Logger.Stderrf("InterfaceAddrs: %v", err)
 //		CleanExit(1)
 //	}
 //	return

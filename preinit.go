@@ -24,6 +24,7 @@ import (
 
 	"github.com/wheelcomplex/preinit/getopt"
 	"github.com/wheelcomplex/preinit/logger"
+	"github.com/wheelcomplex/preinit/misc"
 )
 
 const (
@@ -42,7 +43,7 @@ var OrigProcTitle string
 func setproctitle_init() {
 	opts = getopt.NewOpts(os.Args[1:])
 	if len(OrigProcTitle) == 0 {
-		OrigProcTitle = getopt.cleanArgLine(os.Args[0] + " " + opts.String())
+		OrigProcTitle = misc.CleanArgLine(os.Args[0] + " " + opts.String())
 	}
 	HaveSetProcTitle = int(C.spt_init1())
 
@@ -116,14 +117,13 @@ func SetGoMaxCPUs(n int) int {
 
 //// VARS ////
 
-// default logger for preinit
-var Logger *logger.LoggerT
+// using default logger from logger package
+var l = logger.L
 
 //
 func loggerInit() {
-	Logger = logger.NewLogger("[pre-"+strconv.Itoa(os.Getpid())+"] ", logger.LogFlag)
 	// set to 5, all call by wrapper
-	Logger.Calldepth(5)
+	l.Calldepth(5)
 }
 
 // copy of os.Args for default arguments parser
@@ -329,76 +329,6 @@ func updatePreDirs(key, value string) {
 		return
 	}
 	preDirs[key] = value
-}
-
-// SetProcTitle
-
-const (
-	// These values must match the return values for spt_init1() used in C.
-	HaveNone        = 0
-	HaveNative      = 1
-	HaveReplacement = 2
-)
-
-var (
-	HaveSetProcTitle int
-)
-
-// orig proc title
-var OrigProcTitle string
-
-//
-func setproctitle_init() {
-	if len(OrigProcTitle) == 0 {
-		OrigProcTitle = CleanArgLine(os.Args[0] + " " + opts.String())
-	}
-	HaveSetProcTitle = int(C.spt_init1())
-
-	if HaveSetProcTitle == HaveReplacement {
-		newArgs := make([]string, len(os.Args))
-		for i, s := range os.Args {
-			// Use cgo to force go to make copies of the strings.
-			cs := C.CString(s)
-			newArgs[i] = C.GoString(cs)
-			C.free(unsafe.Pointer(cs))
-		}
-		os.Args = newArgs
-
-		env := os.Environ()
-		for _, kv := range env {
-			skv := strings.SplitN(kv, "=", 2)
-			os.Setenv(skv[0], skv[1])
-		}
-
-		argc := C.int(len(os.Args))
-		arg0 := C.CString(os.Args[0])
-		defer C.free(unsafe.Pointer(arg0))
-
-		C.spt_init2(argc, arg0)
-
-		// Restore the original title.
-		SetProcTitle(os.Args[0])
-	}
-}
-
-func SetProcTitle(title string) {
-	cs := C.CString(title)
-	defer C.free(unsafe.Pointer(cs))
-	C.spt_setproctitle(cs)
-}
-
-func SetProcTitlePrefix(prefix string) {
-	title := prefix + OrigProcTitle
-	cs := C.CString(title)
-	defer C.free(unsafe.Pointer(cs))
-	C.spt_setproctitle(cs)
-}
-
-func SetProcTitleSuffix(prefix string) {
-	title := OrigProcTitle + prefix
-	cs := C.CString(title)
-	defer C.free(unsafe.Pointer(cs))
-	C.spt_setproctitle(cs)
 }
 
 /*
